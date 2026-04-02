@@ -1,16 +1,65 @@
-# 这是一个示例 Python 脚本。
+"""
+DINO MRI Pretraining — Entry Point.
 
-# 按 Shift+F10 执行或将其替换为您的代码。
-# 按 双击 Shift 在所有地方搜索类、文件、工具窗口、操作和设置。
+Usage:
+    # Single GPU
+    python train.py --output_dir outputs/dino_ixi
+
+    # Custom config
+    python train.py --config_file configs/pretrain.yaml --output_dir outputs/dino_ixi
+
+    # Override params via CLI
+    python train.py --output_dir outputs/debug \
+        train.batch_size_per_gpu=4 optim.epochs=5 train.data_dir=data/IXI-T1
+
+    # Multi-GPU
+    accelerate launch train.py --output_dir outputs/dino_ixi
+
+    # Convenience script
+    bash scripts/pretrain.sh
+"""
+import argparse
+
+from src.utils.config import get_cfg_from_args, apply_scaling_rules, write_config
+from src.engine.trainer import Trainer
 
 
-def print_hi(name):
-    # 在下面的代码行中使用断点来调试脚本。
-    print(f'Hi, {name}')  # 按 Ctrl+F8 切换断点。
+def get_args_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="DINO MRI Pretraining")
+    parser.add_argument(
+        "--config_file", type=str, default=None,
+        help="Path to YAML config. Defaults to configs/pretrain.yaml",
+    )
+    parser.add_argument(
+        "--output_dir", type=str, default="outputs/dino_ixi",
+        help="Output directory for checkpoints and logs",
+    )
+    parser.add_argument(
+        "--opts", default=None, nargs=argparse.REMAINDER,
+        help="Override config: key1=val1 key2=val2 ...",
+    )
+    return parser
 
 
-# 按装订区域中的绿色按钮以运行脚本。
-if __name__ == '__main__':
-    print_hi('PyCharm')
+def main():
+    parser = get_args_parser()
+    args = parser.parse_args()
 
-# 访问 https://www.jetbrains.com/help/pycharm/ 获取 PyCharm 帮助
+    cfg = get_cfg_from_args(args)
+
+    try:
+        import torch.distributed as dist
+        world_size = dist.get_world_size() if dist.is_initialized() else 1
+    except Exception:
+        world_size = 1
+    cfg = apply_scaling_rules(cfg, world_size=world_size)
+
+    write_config(cfg, cfg.train.output_dir)
+    print(f"Effective LR: {cfg.optim.lr:.6f}")
+
+    trainer = Trainer(cfg)
+    trainer.train()
+
+
+if __name__ == "__main__":
+    main()

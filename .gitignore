@@ -1,0 +1,51 @@
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
+
+# ===== Data — never commit imaging data =====
+data/*
+!data/.gitkeep
+
+# ===== Outputs — checkpoints, logs, generated configs =====
+outputs/*
+!outputs/.gitkeep
+
+# ===== Cache =====
+cache/
+.monai/
+wandb/
+.cache/
+
+# ===== IDE =====
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ===== OS =====
+.DS_Store
+Thumbs.db
+
+# ===== Environment =====
+.env
+*.env.local
+venv/
+.venv/
+env/
+
+# ===== Jupyter =====
+.ipynb_checkpoints/
+*.ipynb
+
+# ===== Misc =====
+*.log
+*.pt
+*.pth
+*.ckpt
