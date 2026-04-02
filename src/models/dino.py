@@ -377,3 +377,171 @@ class DINOv2(nn.Module):
         teacher_cls_out, teacher_masked_out = self.forward_teacher(global_views, mask)
         student_cls_out, student_masked_out = self.forward_student(global_views, local_views, mask)
         return teacher_cls_out, teacher_masked_out, student_cls_out, student_masked_out
+
+
+# ---------------------------------------------------------------------------
+# DINOv3 Framework (DINOv2 + Gram Anchoring)
+# ---------------------------------------------------------------------------
+
+class DINOv3(DINOv2):
+    """DINOv3 framework — extends DINOv2 with Gram Anchoring.
+
+    Gram Anchoring prevents dense patch features from degrading during long
+    training schedules. It maintains a frozen "Gram Teacher" — a periodic
+    snapshot of the EMA teacher — and adds an MSE loss between the Gram
+    matrices (patch-token similarity structure) of student and Gram teacher.
+
+    The Gram Teacher is updated by copying the current EMA teacher weights
+    every `gram_update_freq` steps, starting after `gram_first_update_step`.
+    Between updates, the Gram Teacher is completely frozen.
+
+    Args:
+        backbone: ViT backbone.
+        input_dim: Embedding dimension.
+        hidden_dim / bottleneck_dim / output_dim: Projection head dims.
+        ibot_seperate_head: Separate heads for DINO and iBOT objectives.
+        student_drop_path_rate: Drop path for student.
+        freeze_last_layer: Epochs to freeze projection last layer.
+        gram_update_freq: Steps between Gram Teacher updates.
+        gram_first_update_step: First step to snapshot the Gram Teacher.
+        gram_max_updates: Max number of Gram Teacher updates (None = unlimited).
+        reg_tokens: Number of register tokens (DINOv3 trains with these from start).
+    """
+
+    def __init__(
+        self,
+        backbone: "VisionTransformer",
+        input_dim: int,
+        hidden_dim: int = 2048,
+        bottleneck_dim: int = 256,
+        output_dim: int = 65536,
+        ibot_seperate_head: bool = False,
+        student_drop_path_rate: float = 0.1,
+        freeze_last_layer: int = -1,
+        gram_update_freq: int = 10000,
+        gram_first_update_step: int = 0,
+        gram_max_updates: int | None = None,
+    ):
+        super().__init__(
+            backbone=backbone,
+            input_dim=input_dim,
+            hidden_dim=hidden_dim,
+            bottleneck_dim=bottleneck_dim,
+            output_dim=output_dim,
+            ibot_seperate_head=ibot_seperate_head,
+            student_drop_path_rate=student_drop_path_rate,
+            freeze_last_layer=freeze_last_layer,
+        )
+
+        # Gram Teacher: an independent frozen copy, periodically refreshed
+        self.gram_teacher = deepcopy(self.backbone_teacher)
+        deactivate_requires_grad_and_to_eval(self.gram_teacher)
+
+        self.gram_update_freq = gram_update_freq
+        self.gram_first_update_step = gram_first_update_step
+        self.gram_max_updates = gram_max_updates
+        self._gram_update_count = 0
+        self._gram_initialized = False
+
+    @torch.no_grad()
+    def maybe_update_gram_teacher(self, global_step: int) -> bool:
+        """Snapshot EMA teacher into Gram Teacher if conditions are met.
+
+        Called every training step. Returns True if an update happened.
+        """
+        if global_step < self.gram_first_update_step:
+            return False
+        if self.gram_max_updates is not None and self._gram_update_count >= self.gram_max_updates:
+            return False
+
+        do_update = False
+        if not self._gram_initialized:
+            # First snapshot: always update
+            do_update = True
+            self._gram_initialized = True
+        elif (global_step - self.gram_first_update_step) % self.gram_update_freq == 0:
+            do_update = True
+
+        if do_update:
+            # Copy EMA teacher weights into Gram teacher
+            for gt_param, t_param in zip(
+                self.gram_teacher.parameters(), self.backbone_teacher.parameters()
+            ):
+                gt_param.data.copy_(t_param.data)
+            self.gram_teacher.eval()
+            self._gram_update_count += 1
+            return True
+
+        return False
+
+    @torch.no_grad()
+    def get_gram_features(
+        self,
+        global_views: torch.Tensor,
+        student_features: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Extract patch tokens from student and Gram teacher for Gram loss.
+
+        Args:
+            global_views: (B, C, H, W, D) input images.
+            student_features: (B, seq_len, D) full student output (cls + patches).
+
+        Returns:
+            student_patches: (B, num_patches, D) student patch tokens.
+            gram_teacher_patches: (B, num_patches, D) Gram teacher patch tokens.
+        """
+        # Student: strip CLS and register tokens, keep only patch tokens
+        n_prefix = self.backbone_student.vit.num_prefix_tokens
+        student_patches = student_features[:, n_prefix:]  # (B, P, D)
+
+        # Gram teacher: forward pass with frozen weights
+        gram_features = self.gram_teacher.encode(global_views, mask=None)
+        gram_teacher_patches = gram_features[:, n_prefix:]  # (B, P, D)
+
+        return student_patches, gram_teacher_patches
+
+    def forward(
+        self,
+        global_views: torch.Tensor,
+        local_views: torch.Tensor,
+        mask: torch.Tensor,
+    ) -> dict:
+        """Forward pass returning all outputs needed for DINOv3 losses.
+
+        Returns a dict with:
+            teacher_cls_out: Teacher CLS token projections.
+            teacher_masked_out: Teacher masked patch projections.
+            student_cls_out: Student CLS token projections (global + local).
+            student_masked_out: Student masked patch projections.
+            student_patches: Student patch tokens (pre-head) for Gram loss.
+            gram_teacher_patches: Gram teacher patch tokens for Gram loss.
+        """
+        # Standard DINOv2 outputs
+        teacher_cls_out, teacher_masked_out = self.forward_teacher(global_views, mask)
+
+        # Student forward — need raw features for Gram loss
+        student_features = self.backbone_student.encode(global_views, mask=mask)
+        student_global_cls = student_features[:, 0]
+        student_global_masked = student_features[mask]
+
+        student_global_cls_out = self.head_student_dino(student_global_cls)
+        student_global_masked_out = self.head_student_ibot(student_global_masked)
+
+        student_local_cls = self.backbone_student.encode(local_views, mask=None)[:, 0]
+        student_local_cls_out = self.head_student_dino(student_local_cls)
+
+        student_cls_out = torch.cat([student_global_cls_out, student_local_cls_out], dim=0)
+
+        # Gram features — student patches vs Gram teacher patches
+        student_patches, gram_teacher_patches = self.get_gram_features(
+            global_views, student_features
+        )
+
+        return {
+            "teacher_cls_out": teacher_cls_out,
+            "teacher_masked_out": teacher_masked_out,
+            "student_cls_out": student_cls_out,
+            "student_masked_out": student_global_masked_out,
+            "student_patches": student_patches,
+            "gram_teacher_patches": gram_teacher_patches,
+        }

@@ -280,3 +280,93 @@ class KoLeoLoss(nn.Module):
         nn_dist: torch.Tensor = self.pairwise_distance(x, x[nn_idx])
         loss = -(nn_dist + self.eps).log().mean()
         return loss
+
+
+# ---------------------------------------------------------------------------
+# Gram Anchoring Loss (DINOv3)
+# ---------------------------------------------------------------------------
+
+class GramLoss(nn.Module):
+    """Gram Anchoring loss from DINOv3.
+
+    Prevents dense feature degradation during long training by anchoring the
+    patch-token similarity structure (Gram matrix) to a frozen reference.
+
+    Computes MSE between the Gram matrices (pairwise cosine similarity) of
+    student and teacher patch tokens.
+
+    From: facebookresearch/dinov3 (DINOv3 License)
+    Paper: https://arxiv.org/abs/2508.10104
+
+    Args:
+        apply_norm: L2-normalize features before computing Gram matrix.
+        img_level: If True, compute Gram per image (B, N, D) → (B, N, N).
+                   If False, flatten to (B*N, D) and compute one big Gram.
+        remove_neg: Zero out negative cosine similarities in both student and teacher.
+        remove_only_teacher_neg: Zero out negatives only in teacher (and matching positions in student).
+    """
+
+    def __init__(
+        self,
+        apply_norm: bool = True,
+        img_level: bool = True,
+        remove_neg: bool = False,
+        remove_only_teacher_neg: bool = False,
+    ):
+        super().__init__()
+        self.mse_loss = nn.MSELoss()
+        self.apply_norm = apply_norm
+        self.remove_neg = remove_neg
+        self.remove_only_teacher_neg = remove_only_teacher_neg
+
+        if self.remove_neg and self.remove_only_teacher_neg:
+            raise ValueError("remove_neg and remove_only_teacher_neg are mutually exclusive")
+
+    def forward(
+        self,
+        student_feats: torch.Tensor,
+        teacher_feats: torch.Tensor,
+        img_level: bool = True,
+    ) -> torch.Tensor:
+        """
+        Args:
+            student_feats: (B, N, D) patch token features from student backbone.
+            teacher_feats: (B, N, D) patch token features from Gram teacher (frozen reference).
+            img_level: If True, Gram is per-image. If False, flatten across batch.
+
+        Returns:
+            Scalar MSE loss between student and teacher Gram matrices.
+        """
+        if img_level:
+            assert student_feats.ndim == 3 and teacher_feats.ndim == 3
+
+        student_feats = student_feats.float()
+        teacher_feats = teacher_feats.float()
+
+        # Normalize
+        if self.apply_norm:
+            teacher_feats = F.normalize(teacher_feats, dim=-1)
+        if not img_level and teacher_feats.ndim == 3:
+            teacher_feats = teacher_feats.flatten(0, 1)
+
+        # Teacher Gram matrix
+        teacher_sim = torch.matmul(teacher_feats, teacher_feats.transpose(-1, -2))
+
+        if self.apply_norm:
+            student_feats = F.normalize(student_feats, dim=-1)
+        if not img_level and student_feats.ndim == 3:
+            student_feats = student_feats.flatten(0, 1)
+
+        # Student Gram matrix
+        student_sim = torch.matmul(student_feats, student_feats.transpose(-1, -2))
+
+        # Optional: remove negative similarities
+        if self.remove_neg:
+            teacher_sim = teacher_sim.clamp(min=0.0)
+            student_sim = student_sim.clamp(min=0.0)
+        elif self.remove_only_teacher_neg:
+            neg_mask = teacher_sim < 0
+            teacher_sim[neg_mask] = 0.0
+            student_sim[neg_mask] = 0.0
+
+        return self.mse_loss(student_sim, teacher_sim)

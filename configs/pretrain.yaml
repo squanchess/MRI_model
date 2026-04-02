@@ -1,12 +1,10 @@
 # =============================================================================
-# DINO Pretraining Config for IXI T1 MRI
+# DINOv3 Pretraining Config for IXI T1 MRI
 #
-# Adapted from SPECTRE dino_default.yaml. Key changes:
-#   - IXI dataset (~600 volumes vs SPECTRE's ~100K CT scans)
-#   - Smaller batch size (8 vs 128)
-#   - More epochs (300 vs 100) to compensate
-#   - ViT-Small backbone (lighter for IXI scale)
-#   - Isotropic crop sizes (96^3 global, 48^3 local)
+# Based on SPECTRE + DINOv3 (facebookresearch/dinov3) innovations:
+#   - Gram Anchoring: prevents patch feature degradation in long training
+#   - Register tokens: trained from the start (not post-hoc)
+#   - RoPE coord augmentations: shift/jitter/rescale for resolution robustness
 # =============================================================================
 
 train:
@@ -24,7 +22,6 @@ train:
   drop_last: true
   log_wandb: false
   log_freq: 10
-  wandb_project: dinov3_mri
 
 optim:
   epochs: 300
@@ -59,9 +56,29 @@ model:
   num_base_patches: 4
   num_local_views: 6
 
+  # --- DINOv3: Register tokens (trained from the start) ---
+  reg_tokens: 4
+
+  # --- DINOv3: RoPE coord augmentations ---
+  rope_shift_coords: 0.5
+  rope_jitter_coords: 1.5
+  rope_rescale_coords: 1.5
+
   # --- MRI-specific transform settings ---
   global_views_size: [96, 96, 96]
   local_views_size: [48, 48, 48]
   local_views_scale: [0.25, 0.5]
   roi_size: [192, 224, 192]
   spacing: [1.0, 1.0, 1.0]
+
+# --- DINOv3: Gram Anchoring ---
+gram:
+  enabled: true
+  loss_weight: 1.0
+  img_level: true                     # Gram matrix per image (not per batch)
+  apply_norm: true                    # L2-normalize before computing similarity
+  remove_neg: false
+  remove_only_teacher_neg: false
+  update_freq: 10000                  # Refresh Gram Teacher every N steps
+  first_update_step: 0                # Start Gram anchoring from step 0
+  max_updates: null                   # Unlimited updates (null = no limit)

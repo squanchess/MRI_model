@@ -18,7 +18,7 @@ from torch.utils.data import DataLoader
 from accelerate import Accelerator, DataLoaderConfiguration
 
 from src.models import vit_small_patch16_96, vit_base_patch16_96, vit_base_rope_patch16_96
-from src.models import DINO, DINOLoss
+from src.models import DINO, DINOLoss, GramLoss
 from src.data import IXIDataset, DINOTransform
 from src.data.collate import collate_dino
 from src.utils import (
@@ -114,7 +114,29 @@ class Trainer:
                 f"Unknown architecture: {arch_name}. "
                 f"Available: {list(_ARCHITECTURES.keys())}"
             )
-        backbone = _ARCHITECTURES[arch_name](num_classes=0, dynamic_img_size=True)
+
+        # DINOv3 features: register tokens + RoPE coord augmentations
+        backbone_kwargs = dict(num_classes=0, dynamic_img_size=True)
+
+        reg_tokens = cfg.model.get("reg_tokens", 0)
+        if reg_tokens > 0:
+            backbone_kwargs["reg_tokens"] = reg_tokens
+            self.print(f"Using {reg_tokens} register tokens (DINOv3)")
+
+        # RoPE coordinate augmentations (DINOv3 style)
+        rope_kwargs = {}
+        if cfg.model.get("rope_shift_coords") is not None:
+            rope_kwargs["shift_coords"] = cfg.model.rope_shift_coords
+        if cfg.model.get("rope_jitter_coords") is not None:
+            rope_kwargs["jitter_coords"] = cfg.model.rope_jitter_coords
+        if cfg.model.get("rope_rescale_coords") is not None:
+            rope_kwargs["rescale_coords"] = cfg.model.rope_rescale_coords
+        if rope_kwargs:
+            backbone_kwargs["pos_embed"] = "rope"
+            backbone_kwargs["rope_kwargs"] = rope_kwargs
+            self.print(f"RoPE augmentations: {rope_kwargs}")
+
+        backbone = _ARCHITECTURES[arch_name](**backbone_kwargs)
         embed_dim = backbone.embed_dim
         self.print(f"Backbone: {arch_name}, embed_dim={embed_dim}")
 
@@ -162,6 +184,32 @@ class Trainer:
             student_temp=cfg.model.student_temp,
             center_momentum=cfg.model.center_momentum,
         )
+
+        # DINOv3: Gram Anchoring loss
+        gram_cfg = cfg.get("gram", {})
+        use_gram = gram_cfg.get("enabled", False)
+        if use_gram:
+            gram_criterion = GramLoss(
+                apply_norm=gram_cfg.get("apply_norm", True),
+                img_level=gram_cfg.get("img_level", True),
+                remove_neg=gram_cfg.get("remove_neg", False),
+                remove_only_teacher_neg=gram_cfg.get("remove_only_teacher_neg", False),
+            )
+            gram_loss_weight = gram_cfg.get("loss_weight", 1.0)
+            gram_update_freq = gram_cfg.get("update_freq", 10000)
+            gram_first_update = gram_cfg.get("first_update_step", 0)
+            gram_max_updates = gram_cfg.get("max_updates", None)
+            # Gram teacher: frozen snapshot of EMA teacher, refreshed periodically
+            from copy import deepcopy
+            gram_teacher = deepcopy(model.backbone_teacher if hasattr(model, 'backbone_teacher') else unwrapped.backbone_teacher)
+            from src.utils.modeling import deactivate_requires_grad_and_to_eval
+            deactivate_requires_grad_and_to_eval(gram_teacher)
+            gram_update_count = 0
+            gram_initialized = False
+            self.print(f"Gram Anchoring: weight={gram_loss_weight}, update_freq={gram_update_freq}")
+        else:
+            gram_criterion = None
+            self.print("Gram Anchoring: disabled")
         optimizer = self.build_optimizer(model)
 
         # Prepare distributed
@@ -227,11 +275,50 @@ class Trainer:
 
                     n_gv = gv.shape[0]
                     n_total = n_gv + lv.shape[0]
-                    loss = criterion(
+                    dino_loss = criterion(
                         teacher_out=teacher_out.chunk(n_gv, dim=0),
                         student_out=student_out.chunk(n_total, dim=0),
                         epoch=epoch,
                     )
+
+                    # DINOv3: Gram Anchoring loss
+                    loss = dino_loss
+                    gram_loss_val = 0.0
+                    if use_gram:
+                        # Maybe update Gram teacher (periodic snapshot of EMA teacher)
+                        if global_step >= gram_first_update:
+                            do_gram_update = False
+                            if not gram_initialized:
+                                do_gram_update = True
+                                gram_initialized = True
+                            elif (global_step - gram_first_update) % gram_update_freq == 0:
+                                if gram_max_updates is None or gram_update_count < gram_max_updates:
+                                    do_gram_update = True
+                            if do_gram_update:
+                                for gt_p, t_p in zip(gram_teacher.parameters(), unwrapped.backbone_teacher.parameters()):
+                                    gt_p.data.copy_(t_p.data)
+                                gram_teacher.eval()
+                                gram_update_count += 1
+                                self.print(f"  Gram Teacher updated (#{gram_update_count}) at step {global_step}")
+
+                        # Compute Gram loss on student vs Gram teacher patch tokens
+                        if gram_initialized:
+                            # Student patch features (pre-head, from global views only)
+                            with torch.no_grad():
+                                student_features = unwrapped.backbone_student(gv).flatten(start_dim=1)
+                            # Reshape: student_features is (B, embed_dim) after pooling
+                            # We need pre-pooling patch tokens. Use forward_features instead:
+                            student_feat_full = unwrapped.backbone_student.forward_features(gv)  # (B, seq_len, D)
+                            n_prefix = unwrapped.backbone_student.num_prefix_tokens
+                            student_patches = student_feat_full[:, n_prefix:]  # (B, P, D)
+
+                            with torch.no_grad():
+                                gram_feat_full = gram_teacher.forward_features(gv)  # (B, seq_len, D)
+                                gram_patches = gram_feat_full[:, n_prefix:]  # (B, P, D)
+
+                            g_loss = gram_criterion(student_patches, gram_patches, img_level=True)
+                            loss = loss + gram_loss_weight * g_loss
+                            gram_loss_val = g_loss.item()
 
                     # Backward
                     self.accelerator.backward(loss)
@@ -252,18 +339,23 @@ class Trainer:
                     dt = time.time() - t0
                     t0 = time.time()
                     if global_step % cfg.train.log_freq == 0:
+                        gram_str = f" gram={gram_loss_val:.4f}" if use_gram else ""
                         self.print(
                             f"E{epoch+1}/{cfg.optim.epochs} "
                             f"S{global_step+1}/{total_steps} "
                             f"loss={loss.item():.4f} "
+                            f"dino={dino_loss.item():.4f}{gram_str} "
                             f"lr={lr:.2e} wd={wd:.4f} mom={mom:.4f} "
                             f"t={dt:.2f}s"
                         )
-                        self.accelerator.log({
-                            "loss": loss.item(), "epoch": epoch,
-                            "lr": lr, "weight_decay": wd,
-                            "momentum": mom, "step_time": dt,
-                        }, step=global_step)
+                        log_dict = {
+                            "loss": loss.item(), "dino_loss": dino_loss.item(),
+                            "epoch": epoch, "lr": lr,
+                            "weight_decay": wd, "momentum": mom, "step_time": dt,
+                        }
+                        if use_gram:
+                            log_dict["gram_loss"] = gram_loss_val
+                        self.accelerator.log(log_dict, step=global_step)
 
                     global_step += 1
 
