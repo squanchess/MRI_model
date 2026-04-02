@@ -18,6 +18,9 @@ Usage:
     # Convenience script
     bash scripts/pretrain.sh
 """
+import os
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+
 import argparse
 
 from src.utils.config import get_cfg_from_args, apply_scaling_rules, write_config
