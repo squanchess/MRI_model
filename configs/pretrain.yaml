@@ -1,0 +1,67 @@
+# =============================================================================
+# DINO Pretraining Config for IXI T1 MRI
+#
+# Adapted from SPECTRE dino_default.yaml. Key changes:
+#   - IXI dataset (~600 volumes vs SPECTRE's ~100K CT scans)
+#   - Smaller batch size (8 vs 128)
+#   - More epochs (300 vs 100) to compensate
+#   - ViT-Small backbone (lighter for IXI scale)
+#   - Isotropic crop sizes (96^3 global, 48^3 local)
+# =============================================================================
+
+train:
+  batch_size_per_gpu: 8
+  grad_accum_steps: 1
+  data_dir: data/IXI-T1
+  data_fraction: 1.0
+  output_dir: outputs/dino_ixi
+  saveckp_freq: 10
+  resume_ckp: true
+  seed: 42
+  num_workers: 4
+  pin_memory: true
+  persistent_workers: true
+  drop_last: true
+  log_wandb: false
+  log_freq: 10
+  wandb_project: dinov3_mri
+
+optim:
+  epochs: 300
+  weight_decay: 0.04
+  weight_decay_end: 0.4
+  base_lr: 0.0005
+  lr: 0.0
+  warmup_epochs: 20
+  min_lr: 1.0e-06
+  llrd_factor: 0.9
+  patch_embed_lr_mult: 0.2
+  projection_head_wd_mult: 1.0
+  clip_grad_norm: 3.0
+  scaling_rule: sqrt_wrt_1024
+  adamw_beta1: 0.9
+  adamw_beta2: 0.999
+
+model:
+  architecture: vit_small_patch16_96
+  pretrained_weights: null
+  hidden_dim: 2048
+  bottleneck_dim: 256
+  output_dim: 65536
+  momentum_teacher: 0.996
+  momentum_teacher_end: 1.0
+  warmup_teacher_temp: 0.04
+  teacher_temp: 0.07
+  warmup_teacher_temp_epochs: 30
+  student_temp: 0.1
+  center_momentum: 0.9
+  freeze_last_layer: 1
+  num_base_patches: 4
+  num_local_views: 6
+
+  # --- MRI-specific transform settings ---
+  global_views_size: [96, 96, 96]
+  local_views_size: [48, 48, 48]
+  local_views_scale: [0.25, 0.5]
+  roi_size: [192, 224, 192]
+  spacing: [1.0, 1.0, 1.0]

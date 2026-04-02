@@ -1,0 +1,10 @@
+# Training outputs (checkpoints, logs, saved configs) go here.
+# This directory is git-ignored. Only this .gitkeep file is tracked.
+#
+# Structure after training:
+#   outputs/
+#   └── dino_ixi/
+#       ├── config.yaml              ← Resolved config snapshot
+#       ├── checkpoint.pt            ← Latest checkpoint (auto-resume)
+#       ├── checkpoint_epoch=0010.pt ← Periodic checkpoints
+#       └── logs/                    ← WandB logs (if enabled)
