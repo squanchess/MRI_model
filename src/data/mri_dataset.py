@@ -1,24 +1,24 @@
 """
-IXI T1 MRI Dataset.
+IXI T1 MRI 数据集。
 
-The IXI dataset contains ~600 T1-weighted brain MRI volumes from three
-London hospitals, distributed as NIfTI files:
+IXI 数据集包含约 600 个 T1 加权脑 MRI 体数据，来自伦敦三家医院，
+以 NIfTI 文件形式分发：
   - IXI002-Guys-0828-T1.nii.gz   (Guy's Hospital, Philips 1.5T)
   - IXI012-HH-1211-T1.nii.gz     (Hammersmith Hospital, Philips 3T)
   - IXI015-IOP-0852-T1.nii.gz    (Institute of Psychiatry, GE 1.5T)
 
-Typical volume shape: ~256 × 256 × 130-150, voxel size ~0.94 × 0.94 × 1.2 mm.
+典型体数据尺寸约为：256 x 256 x 130-150，体素间距约为 0.94 x 0.94 x 1.2 mm。
 
-Usage:
+用法：
     dataset = IXIDataset(data_dir="/path/to/IXI-T1", transform=my_transform)
     sample = dataset[0]  # {"image": "/path/to/IXI002-Guys-0828-T1.nii.gz"}
 """
-import os
 import glob
+import os
 import warnings
-from typing import Optional, Callable, List
+from typing import Callable, List, Optional
 
-from monai.data import Dataset, CacheDataset, PersistentDataset
+from monai.data import CacheDataset, Dataset, PersistentDataset
 
 
 def _discover_ixi_files(
@@ -26,33 +26,33 @@ def _discover_ixi_files(
     sites: Optional[List[str]] = None,
     fraction: float = 1.0,
 ) -> List[dict]:
-    """Scan data_dir for IXI T1 NIfTI files.
+    """扫描 `data_dir`，查找 IXI T1 的 NIfTI 文件。
 
-    Supports two directory layouts:
+    支持两种目录结构：
 
-    Layout A — flat directory (standard IXI download):
+    结构 A：扁平目录（标准 IXI 下载形式）：
         data_dir/
             IXI002-Guys-0828-T1.nii.gz
             IXI012-HH-1211-T1.nii.gz
             ...
 
-    Layout B — per-subject folders (e.g. FLamby/TorchIO style):
+    结构 B：按受试者分目录（例如 FLamby/TorchIO 风格）：
         data_dir/
             IXI002-Guys-0828/
                 T1/
                     IXI002-Guys-0828-T1.nii.gz
             ...
 
-    Args:
-        data_dir: Root directory containing IXI data.
-        sites: Filter by hospital site(s). Options: "Guys", "HH", "IOP".
-                None = use all sites.
-        fraction: Fraction of data to use (0, 1]. Useful for debugging.
+    参数：
+        data_dir: IXI 数据根目录。
+        sites: 按医院站点筛选，可选值为 "Guys"、"HH"、"IOP"；
+            为 None 时使用全部站点。
+        fraction: 使用的数据比例，范围为 (0, 1]，便于调试。
 
-    Returns:
-        List of dicts [{"image": path}, ...] for MONAI transforms.
+    返回：
+        供 MONAI transform 使用的字典列表，格式为 [{"image": path}, ...]。
     """
-    # Try Layout A first (flat)
+    # 先尝试结构 A（扁平目录）
     patterns = [
         os.path.join(data_dir, "*.nii.gz"),
         os.path.join(data_dir, "*.nii"),
@@ -61,13 +61,13 @@ def _discover_ixi_files(
     for p in patterns:
         files.extend(sorted(glob.glob(p)))
 
-    # Filter for T1 files if mixed modalities are present
+    # 筛选 T1 数据
     t1_files = [f for f in files if "T1" in os.path.basename(f).upper()]
     if not t1_files:
-        # Maybe all files are T1 (user already filtered), use everything
+        # 如果筛选不到，则默认这些文件全都是 T1
         t1_files = files
 
-    # Try Layout B if flat didn't work
+    # 如果扁平目录未找到，再尝试结构 B
     if not t1_files:
         patterns_nested = [
             os.path.join(data_dir, "**", "*T1*.nii.gz"),
@@ -83,7 +83,7 @@ def _discover_ixi_files(
             f"Expected IXI*-T1.nii.gz files or nested T1/ directories."
         )
 
-    # Filter by hospital site
+    # 按医院站点筛选
     if sites is not None:
         site_set = {s.upper() for s in sites}
         filtered = []
@@ -99,27 +99,28 @@ def _discover_ixi_files(
         else:
             t1_files = filtered
 
-    # Apply fraction
+    # 按比例截取数据
     n = max(1, int(len(t1_files) * fraction))
     t1_files = t1_files[:n]
 
-    # Build MONAI-compatible data list
+    # 构造兼容 MONAI 的数据列表
     data_list = [{"image": f} for f in t1_files]
     return data_list
 
 
 class IXIDataset(Dataset):
-    """IXI T1 MRI dataset using MONAI's Dataset.
+    """基于 MONAI Dataset 的 IXI T1 MRI 数据集。
 
-    Each sample is loaded on-the-fly. Use IXICacheDataset or
-    IXIPersistentDataset for faster training with caching.
+    每个样本在访问时即时加载。如果希望借助缓存提高训练速度，
+    可以使用 IXICacheDataset 或 IXIPersistentDataset。
 
-    Args:
-        data_dir: Path to directory containing IXI T1 NIfTI files.
-        transform: MONAI transform pipeline (e.g. DINOTransform).
-        sites: Filter by hospital ("Guys", "HH", "IOP"). None = all.
-        fraction: Fraction of dataset to use (for debugging).
+    参数：
+        data_dir: 包含 IXI T1 NIfTI 文件的目录路径。
+        transform: MONAI 的变换流水线（例如 DINOTransform）。
+        sites: 医院筛选项（"Guys"、"HH"、"IOP"），None 表示全部。
+        fraction: 使用的数据集比例，常用于调试。
     """
+
     def __init__(
         self,
         data_dir: str,
@@ -132,20 +133,20 @@ class IXIDataset(Dataset):
 
 
 class IXICacheDataset(CacheDataset):
-    """IXI T1 dataset with in-memory caching (faster after first epoch).
+    """带内存缓存的 IXI T1 数据集（首个 epoch 后会更快）。
 
-    Caches the result of the deterministic transforms (loading, resampling,
-    normalization) in memory. Random augmentations are still applied fresh
-    each epoch.
+    会将确定性变换（加载、重采样、归一化等）的结果缓存在内存中。
+    随机增强仍会在每个 epoch 重新执行。
 
-    Args:
-        data_dir: Path to IXI T1 NIfTI files.
-        transform: Full transform pipeline.
-        sites: Hospital filter.
-        fraction: Data fraction.
-        cache_rate: Fraction of dataset to cache (1.0 = all).
-        num_workers: Workers for parallel caching at init.
+    参数：
+        data_dir: IXI T1 NIfTI 文件所在路径。
+        transform: 完整的变换流水线。
+        sites: 医院筛选条件。
+        fraction: 数据使用比例。
+        cache_rate: 缓存比例，1.0 表示全部缓存。
+        num_workers: 初始化时用于并行构建缓存的 worker 数量。
     """
+
     def __init__(
         self,
         data_dir: str,
@@ -165,18 +166,19 @@ class IXICacheDataset(CacheDataset):
 
 
 class IXIPersistentDataset(PersistentDataset):
-    """IXI T1 dataset with disk-based persistent caching.
+    """带磁盘持久化缓存的 IXI T1 数据集。
 
-    Saves deterministic transform results to disk. Useful when the dataset
-    is too large to cache in memory or when training is resumed frequently.
+    会将确定性变换的结果写入磁盘。当数据集过大、无法完全缓存在内存中，
+    或者训练需要频繁中断恢复时，这种方式更适合。
 
-    Args:
-        data_dir: Path to IXI T1 NIfTI files.
-        transform: Full transform pipeline.
-        sites: Hospital filter.
-        fraction: Data fraction.
-        cache_dir: Directory for persistent cache files.
+    参数：
+        data_dir: IXI T1 NIfTI 文件所在路径。
+        transform: 完整的变换流水线。
+        sites: 医院筛选条件。
+        fraction: 数据使用比例。
+        cache_dir: 持久化缓存文件目录。
     """
+
     def __init__(
         self,
         data_dir: str,

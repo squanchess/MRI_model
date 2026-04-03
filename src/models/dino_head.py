@@ -1,10 +1,10 @@
 """
-DINO Projection Head.
+DINO 投影头。
 
-3-layer MLP + L2 normalization + weight-normalized last layer.
-Used by both DINO and DINOv2.
+结构为 3 层 MLP + L2 归一化 + weight normalization 最后一层。
+同时用于 DINO 与 DINOv2。
 
-Copied from SPECTRE (MIT License) — no modifications needed.
+代码改自 SPECTRE（MIT License），核心逻辑未作修改。
 """
 from typing import List
 
@@ -14,18 +14,19 @@ import torch.nn.functional as F
 
 
 class DINOProjectionHead(nn.Module):
-    """Projection head used in DINO and DINOv2.
+    """DINO / DINOv2 使用的投影头。
 
     - [0]: DINO, 2021, https://arxiv.org/abs/2104.14294
     - [1]: SwAV, 2020, https://arxiv.org/abs/2006.09882
 
     Attributes:
-        input_dim: The input dimension of the head.
-        hidden_dim: The hidden dimension.
-        bottleneck_dim: Dimension of the bottleneck in the last layer.
-        output_dim: The output dimension of the head.
-        freeze_last_layer: Number of epochs during which the output layer is frozen.
+        input_dim: 头部输入维度。
+        hidden_dim: 隐层维度。
+        bottleneck_dim: 最后一层前的瓶颈维度。
+        output_dim: 输出维度。
+        freeze_last_layer: 输出层冻结的 epoch 数。
     """
+
     def __init__(
         self,
         input_dim: int = 2048,
@@ -35,7 +36,7 @@ class DINOProjectionHead(nn.Module):
         batch_norm: bool = False,
         freeze_last_layer: int = -1,
         norm_last_layer: bool = True,
-    ):  
+    ):
         super().__init__()
 
         blocks = [
@@ -65,7 +66,7 @@ class DINOProjectionHead(nn.Module):
             self.last_layer.weight_g.requires_grad = False
 
     def cancel_last_layer_gradients(self, current_epoch: int) -> None:
-        """Cancel last layer gradients to stabilize training."""
+        """在训练早期屏蔽最后一层梯度，以提升稳定性。"""
         if current_epoch >= self.freeze_last_layer:
             return
         for param in self.last_layer.parameters():

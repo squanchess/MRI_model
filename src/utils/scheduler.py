@@ -1,7 +1,7 @@
 """
-Learning rate and parameter schedulers.
+学习率与参数调度器工具。
 
-Copied from SPECTRE (MIT License) — no modifications needed.
+代码改自 SPECTRE（MIT License），逻辑上未做额外修改。
 """
 import warnings
 from typing import Optional
@@ -33,7 +33,7 @@ def cosine_schedule(
     end_value: float,
     period: Optional[int] = None,
 ) -> float:
-    """Cosine decay from start_value to end_value."""
+    """按余弦曲线从 `start_value` 衰减到 `end_value`。"""
     if step < 0:
         raise ValueError(f"Current step number {step} can't be negative.")
     if max_steps < 1:
@@ -76,7 +76,7 @@ def cosine_warmup_schedule(
     warmup_end_value: Optional[float] = None,
     period: Optional[int] = None,
 ) -> float:
-    """Cosine decay with linear warmup."""
+    """带线性 warmup 的余弦衰减。"""
     if warmup_steps < 0:
         raise ValueError(f"Warmup steps {warmup_steps} can't be negative.")
     if warmup_steps > max_steps:
@@ -102,7 +102,7 @@ def cosine_warmup_schedule(
 
 
 class CosineWarmupScheduler(torch.optim.lr_scheduler.LambdaLR):
-    """Cosine warmup scheduler for learning rate."""
+    """用于学习率调度的余弦 warmup 调度器。"""
 
     def __init__(
         self,

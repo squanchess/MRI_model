@@ -1,24 +1,24 @@
 """
-MRI Preprocessing Utilities.
+MRI 预处理工具。
 
-Standalone preprocessing functions for brain MRI data. These can be:
-  1. Run offline via scripts/preprocess_mri.py to save preprocessed volumes
-  2. Imported and composed into MONAI transform pipelines
+这些独立的脑 MRI 预处理函数既可以：
+  1. 通过离线脚本运行，保存预处理后的体数据；
+  2. 直接导入并组合到 MONAI 的变换流水线中。
 
-Key differences from CT preprocessing:
-  - No HU windowing — MRI has no standardized intensity scale
-  - Percentile-based intensity normalization instead
-  - Optional N4 bias field correction (slow, best done offline)
-  - Isotropic resampling (brain MRI is typically near-isotropic)
+与 CT 预处理相比，主要差异包括：
+  - 不使用 HU 窗宽窗位，MRI 没有统一的强度标尺；
+  - 改用基于百分位数的强度归一化；
+  - 可选 N4 偏置场校正（速度较慢，更适合离线执行）；
+  - 使用各向同性重采样（脑 MRI 通常接近各向同性）。
 
-For IXI T1 data:
-  - Input: ~256×256×130-150, spacing ~0.94×0.94×1.2 mm
-  - After preprocessing: 192×224×192 (or similar), spacing 1.0×1.0×1.0 mm
+对于 IXI T1 数据：
+  - 输入大约为 256x256x130-150，spacing 约 0.94x0.94x1.2 mm；
+  - 预处理后通常变为 192x224x192 左右，spacing 为 1.0x1.0x1.0 mm。
 """
-import os
-import glob
 import argparse
-from typing import Tuple, Optional
+import glob
+import os
+from typing import Optional, Tuple
 
 import numpy as np
 
@@ -28,37 +28,37 @@ def get_preprocess_transforms(
     roi_size: Tuple[float, float, float] = (192, 224, 192),
     output_dir: Optional[str] = None,
 ):
-    """Build a MONAI preprocessing pipeline for brain MRI.
+    """构建适用于脑 MRI 的 MONAI 预处理流水线。
 
-    This pipeline performs:
+    该流水线依次执行：
       1. Load NIfTI
       2. Add channel dimension
       3. Reorient to RAS
       4. Resample to isotropic spacing
-      5. Percentile intensity clipping (0.5th-99.5th) → normalize to [0, 1]
+      5. 百分位裁剪强度（0.5%-99.5%）并归一化到 [0, 1]
       6. Center crop to ROI
-      7. Spatial pad (if needed)
-      8. Optionally save to output_dir
+      7. Spatial pad（如有需要）
+      8. 可选：保存到 output_dir
 
-    Args:
-        spacing: Target voxel spacing in mm.
-        roi_size: Center crop size after resampling.
-        output_dir: If provided, save preprocessed volumes here.
+    参数：
+        spacing: 目标体素间距（单位 mm）。
+        roi_size: 重采样后的中心裁剪大小。
+        output_dir: 若提供，则将预处理后的体数据保存到该目录。
 
-    Returns:
-        MONAI Compose transform.
+    返回：
+        MONAI Compose 变换对象。
     """
     from monai.transforms import (
-        Compose,
-        LoadImaged,
-        EnsureChannelFirstd,
-        Orientationd,
-        Spacingd,
-        ScaleIntensityRangePercentilesd,
         CenterSpatialCropd,
-        SpatialPadd,
+        Compose,
+        EnsureChannelFirstd,
         EnsureTyped,
+        LoadImaged,
+        Orientationd,
         SaveImaged,
+        ScaleIntensityRangePercentilesd,
+        Spacingd,
+        SpatialPadd,
     )
 
     transforms = [
@@ -109,21 +109,24 @@ def compute_dataset_statistics(
     spacing: Tuple[float, float, float] = (1.0, 1.0, 1.0),
     max_samples: int = 50,
 ):
-    """Compute intensity statistics across a sample of MRI volumes.
+    """统计一批 MRI 体数据的强度分布。
 
-    Useful for validating preprocessing and choosing normalization parameters.
+    可用于验证预处理效果，并辅助选择归一化参数。
 
-    Args:
-        data_dir: Directory with NIfTI files.
-        spacing: Spacing for resampling before computing stats.
-        max_samples: Maximum number of volumes to sample.
+    参数：
+        data_dir: NIfTI 文件所在目录。
+        spacing: 计算统计量前所使用的重采样 spacing。
+        max_samples: 最多抽样多少个体数据。
 
-    Returns:
-        Dict with global mean, std, min, max, percentiles, and per-volume shapes.
+    返回：
+        包含全局均值、标准差、范围和各体数据形状信息的字典。
     """
     from monai.transforms import (
-        Compose, LoadImaged, EnsureChannelFirstd,
-        Orientationd, Spacingd,
+        Compose,
+        EnsureChannelFirstd,
+        LoadImaged,
+        Orientationd,
+        Spacingd,
     )
 
     files = sorted(glob.glob(os.path.join(data_dir, "*.nii.gz")))
@@ -149,11 +152,11 @@ def compute_dataset_statistics(
     for f in files:
         data = loader({"image": f})
         vol = data["image"].numpy()
-        # Compute stats on non-zero region (rough brain mask)
+        # 仅在非零区域统计，近似视作脑区掩码
         brain = vol[vol > vol.mean() * 0.1]
         all_means.append(float(brain.mean()))
         all_stds.append(float(brain.std()))
-        shapes.append(vol.shape[1:])  # exclude channel dim
+        shapes.append(vol.shape[1:])  # 去掉通道维
 
     stats = {
         "n_volumes": len(files),
@@ -166,25 +169,25 @@ def compute_dataset_statistics(
         "shape_max": tuple(int(x) for x in np.max(shapes, axis=0)),
     }
 
-    print(f"  Global mean: {stats['global_mean']:.2f} ± range [{stats['mean_range'][0]:.2f}, {stats['mean_range'][1]:.2f}]")
-    print(f"  Global std:  {stats['global_std']:.2f} ± range [{stats['std_range'][0]:.2f}, {stats['std_range'][1]:.2f}]")
-    print(f"  Shape range: {stats['shape_min']} to {stats['shape_max']}")
+    print(f"  全局均值: {stats['global_mean']:.2f}，范围 [{stats['mean_range'][0]:.2f}, {stats['mean_range'][1]:.2f}]")
+    print(f"  全局标准差: {stats['global_std']:.2f}，范围 [{stats['std_range'][0]:.2f}, {stats['std_range'][1]:.2f}]")
+    print(f"  形状范围: {stats['shape_min']} 到 {stats['shape_max']}")
 
     return stats
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Preprocess IXI T1 MRI data")
+    parser = argparse.ArgumentParser(description="预处理 IXI T1 MRI 数据")
     parser.add_argument("--data_dir", type=str, required=True,
-                        help="Input directory with IXI T1 NIfTI files")
+                        help="包含 IXI T1 NIfTI 文件的输入目录")
     parser.add_argument("--output_dir", type=str, default=None,
-                        help="Output directory for preprocessed files")
+                        help="预处理结果输出目录")
     parser.add_argument("--spacing", type=float, nargs=3, default=[1.0, 1.0, 1.0],
-                        help="Target voxel spacing in mm")
+                        help="目标体素间距，单位 mm")
     parser.add_argument("--roi_size", type=int, nargs=3, default=[192, 224, 192],
-                        help="Center crop size")
+                        help="中心裁剪尺寸")
     parser.add_argument("--stats_only", action="store_true",
-                        help="Only compute dataset statistics, don't preprocess")
+                        help="仅统计数据集信息，不执行预处理")
     args = parser.parse_args()
 
     if args.stats_only:
@@ -193,7 +196,7 @@ if __name__ == "__main__":
         if args.output_dir is None:
             raise ValueError("--output_dir required when not using --stats_only")
 
-        from monai.data import Dataset, DataLoader
+        from monai.data import DataLoader, Dataset
 
         files = sorted(glob.glob(os.path.join(args.data_dir, "*.nii.gz")))
         if not files:
@@ -208,8 +211,8 @@ if __name__ == "__main__":
         dataset = Dataset(data=data_list, transform=transform)
         loader = DataLoader(dataset, batch_size=1, num_workers=4)
 
-        print(f"Preprocessing {len(data_list)} volumes...")
+        print(f"开始预处理 {len(data_list)} 个体数据...")
         for i, batch in enumerate(loader):
             if (i + 1) % 50 == 0:
-                print(f"  Processed {i + 1}/{len(data_list)}")
-        print(f"Done. Saved to {args.output_dir}")
+                print(f"  已处理 {i + 1}/{len(data_list)}")
+        print(f"完成，结果已保存到 {args.output_dir}")

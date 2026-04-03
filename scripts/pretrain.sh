@@ -1,7 +1,7 @@
 #!/bin/bash
-# DINO MRI Pretraining Launch Script
+# DINO MRI 预训练启动脚本
 #
-# Run from project root:
+# 在项目根目录下运行：
 #   bash scripts/pretrain.sh
 #   NUM_GPUS=4 bash scripts/pretrain.sh
 #   DATA_DIR=/abs/path/to/IXI-T1 bash scripts/pretrain.sh

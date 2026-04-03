@@ -1,38 +1,38 @@
 """
-3D Image to Patch Embedding for MRI volumes.
+面向 MRI 体数据的 3D 图像到 Patch Embedding 模块。
 
-Modified from SPECTRE (MIT License):
-  - Default img_size changed from (128, 128, 64) to (96, 96, 96) for isotropic MRI
-  - Default patch_size changed from (16, 16, 8) to (16, 16, 16) for isotropic patches
-  - Import paths updated to src.* namespace
+基于 SPECTRE（MIT License）修改：
+  - 默认 `img_size` 从 `(128, 128, 64)` 调整为 `(96, 96, 96)`，适配各向同性 MRI
+  - 默认 `patch_size` 从 `(16, 16, 8)` 调整为 `(16, 16, 16)`，使用各向同性 patch
+  - 导入路径切换为 `src.*` 命名空间
 """
 import math
-from typing import Optional, Tuple, Union, Callable
+from typing import Callable, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from src.utils.misc import to_3tuple, Format, nchwd_to
+from src.utils.misc import Format, nchwd_to, to_3tuple
 from src.utils.modeling import resample_patch_embed
 
 
 class PatchEmbed(nn.Module):
-    """3D Image to Patch Embedding.
+    """将 3D 图像转换为 patch embedding。
 
-    Converts a 5D input (B, C, H, W, D) into a sequence of patch embeddings
-    via a single Conv3d with kernel_size = stride = patch_size.
+    通过单个 `Conv3d`，并令 `kernel_size = stride = patch_size`，
+    将 5D 输入 `(B, C, H, W, D)` 转换为 patch 序列。
 
-    For isotropic MRI (e.g. 1mm^3 T1w), use equal patch dimensions like
-    (16, 16, 16). For anisotropic data, adjust patch_size to match the
-    voxel aspect ratio.
+    对于各向同性 MRI（例如 1mm^3 的 T1w），通常使用 `(16, 16, 16)` 这样的等边 patch；
+    如果数据是各向异性的，则应根据体素纵横比调整 `patch_size`。
     """
+
     output_fmt: Format
     dynamic_img_pad: torch.jit.Final[bool]
 
     def __init__(
             self,
-            # ---- MRI defaults: isotropic 96^3 volume, 16^3 patches ----
+            # ---- MRI 默认配置：96^3 各向同性体数据，16^3 patch ----
             img_size: Optional[Union[int, Tuple[int, int, int]]] = (96, 96, 96),
             patch_size: Union[int, Tuple[int, int, int]] = (16, 16, 16),
             in_chans: int = 1,
@@ -59,7 +59,7 @@ class PatchEmbed(nn.Module):
 
         self.proj = nn.Conv3d(in_chans, embed_dim, kernel_size=patch_size, stride=patch_size, bias=bias)
         self.norm = norm_layer(embed_dim) if norm_layer else nn.Identity()
-    
+
     def _init_img_size(self, img_size: Union[int, Tuple[int, int, int]]):
         assert self.patch_size
         if img_size is None:
@@ -68,7 +68,7 @@ class PatchEmbed(nn.Module):
         grid_size = tuple([s // p for s, p in zip(img_size, self.patch_size)])
         num_patches = grid_size[0] * grid_size[1] * grid_size[2]
         return img_size, grid_size, num_patches
-    
+
     def set_input_size(
             self,
             img_size: Optional[Union[int, Tuple[int, int, int]]] = None,
@@ -94,24 +94,24 @@ class PatchEmbed(nn.Module):
         img_size = img_size or self.img_size
         if img_size != self.img_size or new_patch_size is not None:
             self.img_size, self.grid_size, self.num_patches = self._init_img_size(img_size)
-    
+
     def feat_ratio(self, as_scalar=True) -> Union[Tuple[int, int, int], int]:
         if as_scalar:
             return max(self.patch_size)
         else:
             return self.patch_size
-        
+
     def dynamic_feat_size(self, img_size: Tuple[int, int, int]) -> Tuple[int, int, int]:
-        """Get grid (feature) size for given image size taking account of dynamic padding."""
+        """根据输入图像大小计算特征网格尺寸，并考虑动态 padding。"""
         if self.dynamic_img_pad:
             return (
-                math.ceil(img_size[0] / self.patch_size[0]), 
+                math.ceil(img_size[0] / self.patch_size[0]),
                 math.ceil(img_size[1] / self.patch_size[1]),
                 math.ceil(img_size[2] / self.patch_size[2]),
             )
         else:
             return (
-                img_size[0] // self.patch_size[0], 
+                img_size[0] // self.patch_size[0],
                 img_size[1] // self.patch_size[1],
                 img_size[2] // self.patch_size[2],
             )

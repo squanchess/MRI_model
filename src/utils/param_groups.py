@@ -1,7 +1,7 @@
 """
-Parameter group construction with layer-wise learning rate decay (LLRD).
+带逐层学习率衰减（LLRD）的参数分组构造工具。
 
-Copied from SPECTRE (MIT License) — removed SigLIP/LoRA-specific branches.
+代码改自 SPECTRE（MIT License），已移除 SigLIP / LoRA 相关分支。
 """
 import torch.nn as nn
 
@@ -13,7 +13,7 @@ def get_vit_lr_decay_rate(
     force_is_backbone: bool = False,
     shift: int = 0,
 ) -> float:
-    """Get LLRD multiplier for a named parameter."""
+    """根据参数名计算对应的 LLRD 倍率。"""
     layer_id = num_layers + 1
     if name.startswith("backbone") or force_is_backbone:
         if (
@@ -36,11 +36,11 @@ def get_param_groups_with_decay(
     projection_head_wd_mult: float = 1.0,
     num_layers: int | None = None,
 ):
-    """Build optimizer parameter groups with LLRD and selective weight decay.
+    """构造带 LLRD 与选择性权重衰减的优化器参数组。
 
-    - Layer-wise LR decay: deeper layers get higher LR.
-    - No weight decay on biases, norms, learned tokens/embeddings.
-    - Separate multipliers for patch_embed and projection heads.
+    - 逐层学习率衰减：更深层通常使用更高学习率。
+    - 对 bias、norm、可学习 token/embedding 不施加 weight decay。
+    - 对 patch_embed 与 projection head 支持单独倍率控制。
     """
     force_is_backbone = False
     if num_layers is not None:
@@ -78,7 +78,7 @@ def get_param_groups_with_decay(
         if "head" in n or "projection" in n:
             d["wd_mult"] = projection_head_wd_mult
 
-        # No weight decay on biases, norms, layer scale, learned tokens
+        # bias、norm、layer scale、learned token 等参数不做 weight decay
         if n.endswith("bias") or "norm" in n or "gamma" in n:
             d["wd_mult"] = 0.0
 

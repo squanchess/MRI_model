@@ -1,21 +1,21 @@
 """
-General utility functions.
+通用工具函数。
 
-Merged from SPECTRE (MIT License):
-  - _utils.py: fix_random_seeds, to_ntuple helpers
-  - modeling.py: Format enum, nchwd_to/nhwdc_to format converters
+从 SPECTRE（MIT License）中整理合并而来：
+  - `_utils.py`：`fix_random_seeds`、`to_ntuple` 等辅助函数
+  - `modeling.py`：`Format` 枚举、`nchwd_to` / `nhwdc_to` 格式转换工具
 """
 import random
 from enum import Enum
-from typing import Iterable
 from itertools import repeat
+from typing import Iterable
 
-import torch
 import numpy as np
+import torch
 
 
 def fix_random_seeds(seed: int = 31):
-    """Fix random seeds for reproducibility."""
+    """固定随机种子，提升实验可复现性。"""
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
     np.random.seed(seed)
@@ -45,10 +45,10 @@ to_ntuple = _ntuple
 
 
 class Format(str, Enum):
-    NCHWD = 'NCHWD'
-    NHWDC = 'NHWDC'
-    NCL = 'NCL'
-    NLC = 'NLC'
+    NCHWD = "NCHWD"
+    NHWDC = "NHWDC"
+    NCL = "NCL"
+    NLC = "NLC"
 
 
 def nchwd_to(x: torch.Tensor, fmt: Format):

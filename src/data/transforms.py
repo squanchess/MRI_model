@@ -1,82 +1,82 @@
 """
-DINO Multi-Crop Transform for 3D MRI.
+适用于 3D MRI 的 DINO 多裁剪变换。
 
-Modified from SPECTRE (MIT License) — key changes:
+基于 SPECTRE（MIT License）修改，关键差异如下：
 
-CT (SPECTRE)                          MRI (this file)
-─────────────────────────────────────────────────────────────
-ScaleIntensityRange(-1000, 1000)  →   Percentile clip + Z-score normalize
-Spacing(0.5, 0.5, 1.0)           →   Spacing(1.0, 1.0, 1.0) isotropic
-CenterCrop(512, 512, 384)        →   CenterCrop(192, 224, 192) for brain
-Global crop (128, 128, 64)       →   Global crop (96, 96, 96) isotropic
-Local crop (48, 48, 24)          →   Local crop (48, 48, 48) isotropic
-RandScaleIntensityRange (HU)     →   RandScaleIntensity (generic)
+CT (SPECTRE)                          MRI（本文件）
+------------------------------------------------------------
+ScaleIntensityRange(-1000, 1000)   ->  百分位裁剪 + Z-score 归一化
+Spacing(0.5, 0.5, 1.0)             ->  Spacing(1.0, 1.0, 1.0) 各向同性
+CenterCrop(512, 512, 384)          ->  CenterCrop(192, 224, 192) 聚焦脑区
+Global crop (128, 128, 64)         ->  Global crop (96, 96, 96) 各向同性
+Local crop (48, 48, 24)            ->  Local crop (48, 48, 48) 各向同性
+RandScaleIntensityRange (HU)       ->  RandScaleIntensity（通用）
 
-The pipeline structure is preserved from SPECTRE:
-  Load → Normalize → Reorient → Resample → CenterCrop → Pad →
-  RandSpatialCropSamples → DINORandomCropTransform (global/local crops
-  with resize + augmentation)
+整体流程沿用了 SPECTRE 的结构：
+  Load -> Normalize -> Reorient -> Resample -> CenterCrop -> Pad ->
+  RandSpatialCropSamples -> DINORandomCropTransform
+  （生成全局/局部裁剪，并执行 resize 与增强）
 """
 from copy import deepcopy
-from typing import Tuple, Mapping, Hashable, Any, List
+from typing import Any, Hashable, List, Mapping, Tuple
 
 import torch
 from monai.config import KeysCollection
 from monai.transforms import (
-    Compose,
-    LoadImaged,
-    EnsureChannelFirstd,
-    NormalizeIntensityd,
-    ScaleIntensityRangePercentilesd,
-    Orientationd,
-    Spacingd,
     CenterSpatialCropd,
-    SpatialPadd,
+    Compose,
+    EnsureChannelFirstd,
     EnsureTyped,
-    RandSpatialCropSamplesd,
-    SelectItemsd,
-    RandSpatialCropSamples,
-    RandFlip,
+    LazyTransform,
+    LoadImaged,
+    MapTransform,
     OneOf,
+    Orientationd,
+    RandAdjustContrast,
+    RandBiasField,
+    RandFlip,
+    RandGaussianNoise,
     RandGaussianSharpen,
     RandGaussianSmooth,
-    RandGaussianNoise,
-    RandAdjustContrast,
     RandScaleIntensity,
-    RandBiasField,
-    Resize,
-    MapTransform,
+    RandSpatialCropSamples,
+    RandSpatialCropSamplesd,
     Randomizable,
-    LazyTransform,
+    Resize,
+    ScaleIntensityRangePercentilesd,
+    SelectItemsd,
+    Spacingd,
+    SpatialPadd,
 )
 
 
 class DINOTransform(Compose):
-    """DINO multi-crop data augmentation pipeline for 3D MRI.
+    """用于 3D MRI 的 DINO 多裁剪数据增强流水线。
 
-    Produces global and local crops from each MRI volume for DINO-style
-    self-supervised training.
+    会从每个 MRI 体数据中生成全局视图和局部视图，
+    用于 DINO 风格的自监督训练。
 
-    Data flow:
-        1. Load NIfTI → add channel dim
-        2. Percentile intensity clip (0.5th-99.5th) → normalize to [0,1]
-        3. Reorient to RAS → resample to isotropic 1mm³
-        4. Center crop to fixed ROI (brain region)
-        5. Spatial pad (ensure minimum size for cropping)
-        6. Sample multiple base patches from the volume
-        7. For each base patch: create 2 global crops + N local crops
-           with random resize + augmentations
+    数据流：
+        1. 加载 NIfTI，并补充通道维
+        2. 执行百分位强度裁剪（0.5%-99.5%），归一化到 [0, 1]
+        3. 重定向到 RAS 坐标系，并重采样到 1mm 各向同性体素
+        4. 中心裁剪到固定 ROI（聚焦脑区）
+        5. 空间补边，确保后续裁剪最小尺寸足够
+        6. 从体数据中随机采样多个基础 patch
+        7. 针对每个基础 patch，生成 2 个全局裁剪和 N 个局部裁剪，
+           并附加随机 resize 与增强
 
-    Args:
-        num_base_patches: Crops sampled per volume for I/O efficiency.
-        global_views_size: Size of global crops (fed to both teacher & student).
-        local_views_size: Size of local crops (fed to student only).
-        local_views_scale: (min, max) scale range for local crop sampling.
-        num_local_views: Number of local crops per base patch.
-        roi_size: Center crop size to focus on brain region.
-        spacing: Target voxel spacing (mm).
-        dtype: "float32" or "float16".
+    参数：
+        num_base_patches: 每个体数据采样多少个基础 patch，用于提升 I/O 效率。
+        global_views_size: 全局视图尺寸，同时送入 teacher 与 student。
+        local_views_size: 局部视图尺寸，仅送入 student。
+        local_views_scale: 局部裁剪的随机尺度范围 (min, max)。
+        num_local_views: 每个基础 patch 生成多少个局部视图。
+        roi_size: 聚焦脑区的中心裁剪大小。
+        spacing: 目标体素间距（mm）。
+        dtype: "float32" 或 "float16"。
     """
+
     def __init__(
         self,
         num_base_patches: int = 4,
@@ -90,20 +90,20 @@ class DINOTransform(Compose):
     ):
         assert dtype in ["float16", "float32"]
 
-        # Base crop: large enough so that the biggest local crop fits inside
+        # 基础裁剪尺寸需要足够大，以容纳最大的局部裁剪
         base_crop_size = tuple(
             int(sz * (1 / local_views_scale[0])) for sz in local_views_size
-        )  # e.g. (48 / 0.25) = (192, 192, 192)
+        )  # 例如：(48 / 0.25) = (192, 192, 192)
 
         super().__init__([
-            # --- Deterministic preprocessing ---
+            # --- 确定性预处理 ---
             LoadImaged(keys=("image",)),
             EnsureChannelFirstd(
                 keys=("image",),
                 channel_dim="no_channel",
             ),
-            # MRI intensity normalization:
-            # Step 1: Clip extreme values using percentiles (remove background/artifact)
+            # MRI 强度归一化：
+            # 第一步：用百分位裁剪极端值，削弱背景和伪影影响
             ScaleIntensityRangePercentilesd(
                 keys=("image",),
                 lower=0.5,
@@ -112,20 +112,20 @@ class DINOTransform(Compose):
                 b_max=1.0,
                 clip=True,
             ),
-            # Reorient to standard RAS orientation
+            # 重定向到标准 RAS 朝向
             Orientationd(keys=("image",), axcodes="RAS"),
-            # Resample to isotropic 1mm³ voxels
+            # 重采样到 1mm 各向同性体素
             Spacingd(
                 keys=("image",),
                 pixdim=spacing,
                 mode=("bilinear",),
             ),
-            # Center crop to focus on brain (removes most background)
+            # 中心裁剪以聚焦脑区，同时去除大部分背景
             CenterSpatialCropd(
                 keys=("image",),
                 roi_size=roi_size,
             ),
-            # Pad if volume is smaller than base_crop_size
+            # 如果体数据小于基础裁剪尺寸，则进行补边
             SpatialPadd(
                 keys=("image",),
                 spatial_size=base_crop_size,
@@ -135,8 +135,8 @@ class DINOTransform(Compose):
                 dtype=getattr(torch, dtype),
                 device="cpu",
             ),
-            # --- Random sampling ---
-            # Sample multiple base patches from the volume
+            # --- 随机采样 ---
+            # 从体数据中随机采样多个基础 patch
             RandSpatialCropSamplesd(
                 keys=("image",),
                 num_samples=num_base_patches,
@@ -144,7 +144,7 @@ class DINOTransform(Compose):
                 random_size=False,
                 random_center=True,
             ),
-            # DINO multi-crop: global + local views with augmentations
+            # DINO 多裁剪：生成全局与局部视图，并执行增强
             DINORandomCropTransformd(
                 keys=("image",),
                 base_crop_size=base_crop_size,
@@ -161,19 +161,20 @@ class DINOTransform(Compose):
 
 
 class DINORandomCropTransformd(Randomizable, MapTransform, LazyTransform):
-    """Create DINO global and local crops with augmentations.
+    """生成带增强的 DINO 全局与局部裁剪。
 
-    For each input patch, produces:
-      - 2 global crops (random scale 0.5-1.0 of base, resized to global_views_size)
-      - N local crops (random scale local_views_scale of base, resized to local_views_size)
+    对每个输入 patch，会生成：
+      - 2 个全局裁剪（从基础尺寸的 50%-100% 随机采样，再缩放到 global_views_size）
+      - N 个局部裁剪（按 local_views_scale 随机采样，再缩放到 local_views_size）
 
-    Each crop is independently augmented with flips, blur, noise, contrast, etc.
+    每个裁剪都会独立施加翻转、模糊、噪声、对比度等增强。
 
-    Modified from SPECTRE:
-      - RandScaleIntensityRange (CT HU-based) replaced with
-        RandScaleIntensity + RandBiasField (MRI-appropriate)
-      - Gaussian kernel sigma values made isotropic
+    相比 SPECTRE 的改动：
+      - 将面向 CT HU 的 RandScaleIntensityRange 替换为
+        更适合 MRI 的 RandScaleIntensity + RandBiasField
+      - 将高斯核的 sigma 调整为各向同性
     """
+
     def __init__(
         self,
         keys: KeysCollection,
@@ -192,7 +193,7 @@ class DINORandomCropTransformd(Randomizable, MapTransform, LazyTransform):
         self.local_views_scale = local_views_scale
         self.num_local_views = num_local_views
 
-        # Global crops: random size between 50%-100% of base
+        # 全局裁剪：随机尺寸范围为基础 patch 的 50%-100%
         self.cropper_global = RandSpatialCropSamples(
             roi_size=tuple(int(local_views_scale[1] * sz) for sz in base_crop_size),
             num_samples=2,
@@ -201,7 +202,7 @@ class DINORandomCropTransformd(Randomizable, MapTransform, LazyTransform):
             random_size=True,
             lazy=lazy,
         )
-        # Local crops: random size between local_views_scale[0]-[1] of base
+        # 局部裁剪：随机尺寸范围由 local_views_scale 控制
         self.cropper_local = RandSpatialCropSamples(
             roi_size=tuple(int(self.local_views_scale[0] * sz) for sz in base_crop_size),
             num_samples=num_local_views,
@@ -226,13 +227,13 @@ class DINORandomCropTransformd(Randomizable, MapTransform, LazyTransform):
             lazy=lazy,
         )
 
-        # MRI-appropriate augmentations
+        # 更适合 MRI 的增强方式
         self.augmentor = Compose([
-            # Random flips (brain is roughly symmetric in L-R)
+            # 随机翻转（脑部在左右方向上近似对称）
             RandFlip(spatial_axis=0, prob=0.5),
             RandFlip(spatial_axis=1, prob=0.5),
             RandFlip(spatial_axis=2, prob=0.5),
-            # Blur / sharpen (isotropic sigmas for MRI)
+            # 模糊 / 锐化（MRI 使用各向同性 sigma）
             OneOf([
                 RandGaussianSharpen(
                     sigma1_x=(1.0, 2.0), sigma1_y=(1.0, 2.0), sigma1_z=(1.0, 2.0),
@@ -244,13 +245,13 @@ class DINORandomCropTransformd(Randomizable, MapTransform, LazyTransform):
                     prob=0.25,
                 ),
             ]),
-            # Contrast jitter
+            # 对比度抖动
             RandAdjustContrast(gamma=(0.8, 1.2), prob=0.3),
-            # Additive Gaussian noise (simulate acquisition noise)
+            # 叠加高斯噪声，模拟采集噪声
             RandGaussianNoise(std=0.05, sample_std=True, prob=0.25),
-            # Random intensity scaling (simulate scanner intensity drift)
+            # 随机强度缩放，模拟扫描仪强度漂移
             RandScaleIntensity(factors=0.15, prob=0.25),
-            # Simulate MRI bias field inhomogeneity
+            # 模拟 MRI 偏置场不均匀
             RandBiasField(
                 degree=3,
                 coeff_range=(0.0, 0.3),
@@ -270,7 +271,7 @@ class DINORandomCropTransformd(Randomizable, MapTransform, LazyTransform):
         lazy: bool | None = None,
     ) -> dict[Hashable, Any]:
 
-        # Support list of dicts (from RandSpatialCropSamplesd)
+        # 兼容 RandSpatialCropSamplesd 返回的字典列表
         if isinstance(data, list):
             return [self.__call__(d, lazy=lazy) for d in data]
 

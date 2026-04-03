@@ -1,22 +1,22 @@
 """
-Configuration management using OmegaConf.
+基于 OmegaConf 的配置管理工具。
 
-Loads YAML configs from the project's configs/ directory, merges with
-CLI overrides, and applies LR scaling rules.
+负责从项目的 `configs/` 目录加载 YAML 配置，
+合并命令行覆盖项，并应用学习率缩放规则。
 """
-import os
 import math
+import os
 from pathlib import Path
 
 from omegaconf import OmegaConf
 
-# Project root: two levels up from src/utils/config.py
+# 项目根目录：相对于 src/utils/config.py 向上三级
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 DEFAULT_CONFIG_PATH = PROJECT_ROOT / "configs" / "pretrain.yaml"
 
 
 def load_default_config() -> OmegaConf:
-    """Load the default pretrain.yaml config."""
+    """加载默认的 `pretrain.yaml` 配置。"""
     if not DEFAULT_CONFIG_PATH.exists():
         raise FileNotFoundError(
             f"Default config not found at {DEFAULT_CONFIG_PATH}. "
@@ -26,13 +26,13 @@ def load_default_config() -> OmegaConf:
 
 
 def get_cfg_from_args(args) -> OmegaConf:
-    """Build config: default YAML → user YAML → CLI overrides.
+    """构建配置：默认 YAML -> 用户 YAML -> 命令行覆盖项。
 
     Args:
-        args: Namespace with config_file, output_dir, opts attributes.
+        args: 包含 config_file、output_dir、opts 属性的 Namespace。
 
     Returns:
-        Merged OmegaConf config.
+        合并后的 OmegaConf 配置对象。
     """
     args.output_dir = os.path.abspath(args.output_dir)
     args.opts = [] if args.opts is None else args.opts
@@ -50,7 +50,7 @@ def get_cfg_from_args(args) -> OmegaConf:
 
 
 def apply_scaling_rules(cfg, world_size: int = None) -> OmegaConf:
-    """Apply LR scaling: lr = base_lr * sqrt(effective_batch / ref_batch)."""
+    """应用学习率缩放规则：`lr = base_lr * f(effective_batch / ref_batch)`。"""
     base_lr = cfg.optim.base_lr
     cfg.optim.lr = base_lr
 
@@ -81,7 +81,7 @@ def apply_scaling_rules(cfg, world_size: int = None) -> OmegaConf:
 
 
 def write_config(cfg, output_dir: str, name: str = "config.yaml") -> str:
-    """Save resolved config to output directory."""
+    """将解析后的最终配置保存到输出目录。"""
     os.makedirs(output_dir, exist_ok=True)
     saved_path = os.path.join(output_dir, name)
     with open(saved_path, "w") as f:

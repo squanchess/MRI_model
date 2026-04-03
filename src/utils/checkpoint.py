@@ -1,15 +1,15 @@
 """
-Checkpoint save/load with distributed RNG state preservation.
+支持分布式 RNG 状态保存与恢复的 checkpoint 工具。
 
-Copied from SPECTRE (MIT License) — removed CT-specific extraction functions.
+代码改自 SPECTRE（MIT License），已去除 CT 相关的特定提取逻辑。
 """
 import os
 import random
 import warnings
-from typing import Optional, Any
+from typing import Any, Optional
 
-import torch
 import numpy as np
+import torch
 import torch.distributed as dist
 
 
@@ -49,9 +49,9 @@ def _set_local_rng_state(state: dict) -> None:
 
 
 def save_state(ckpt_path: str, epoch: Optional[int] = None, **named_objects: Any) -> None:
-    """Save checkpoint with epoch, model/optimizer state_dicts, and per-rank RNG states.
+    """保存 checkpoint，包括 epoch、各对象 state_dict，以及各 rank 的 RNG 状态。
 
-    In distributed mode, gathers RNG states from all ranks; only rank 0 writes.
+    在分布式模式下，会先收集所有 rank 的 RNG 状态，最终仅由 rank 0 写盘。
     """
     os.makedirs(os.path.dirname(ckpt_path) or ".", exist_ok=True)
     local_rng = _get_local_rng_state()
@@ -82,7 +82,7 @@ def save_state(ckpt_path: str, epoch: Optional[int] = None, **named_objects: Any
 
 
 def load_state(ckpt_path: str, **named_objects: Any) -> int:
-    """Load checkpoint. Returns epoch (int) if present, otherwise 0."""
+    """加载 checkpoint。若存在 epoch 字段则返回其值，否则返回 0。"""
     if not os.path.isfile(ckpt_path):
         warnings.warn(f"Checkpoint file not found: {ckpt_path}")
         return 0

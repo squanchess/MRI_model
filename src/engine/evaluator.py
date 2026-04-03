@@ -1,18 +1,19 @@
 """
-Evaluation utilities for pretrained DINO models.
+预训练 DINO 模型的评估工具。
 
-Provides:
-  - Feature extraction from frozen backbone
-  - kNN classifier (no training needed, fast sanity check)
-  - Linear probe (train a single linear layer on frozen features)
+提供以下能力：
+  - 从冻结 backbone 中提取特征
+  - kNN 分类器评估（无需训练，适合快速 sanity check）
+  - 线性探针评估（在冻结特征上训练单层线性分类器）
 
-These are standard SSL evaluation protocols — not specific to any modality.
+这些都是标准的自监督学习评估协议，并不依赖特定模态。
 """
+from typing import Optional, Tuple
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
-from typing import Optional, Tuple
 
 
 @torch.no_grad()
@@ -21,15 +22,15 @@ def extract_features(
     data_loader: DataLoader,
     device: torch.device = torch.device("cpu"),
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-    """Extract CLS token features from a frozen backbone.
+    """从冻结的 backbone 中提取 CLS token 特征。
 
-    Args:
-        backbone: ViT backbone (should output (B, embed_dim) when num_classes=0).
-        data_loader: DataLoader yielding dicts with "image" key (and optional "label").
-        device: Device to run inference on.
+    参数：
+        backbone: ViT 主干网络；当 `num_classes=0` 时应输出 `(B, embed_dim)`。
+        data_loader: 产出带 `"image"` 键（可选 `"label"`）的 DataLoader。
+        device: 推理设备。
 
-    Returns:
-        (features, labels) tuple. Labels is None if not present in data.
+    返回：
+        `(features, labels)` 元组；若数据中没有标签，则 `labels` 为 None。
     """
     backbone.eval()
     backbone.to(device)
@@ -39,7 +40,7 @@ def extract_features(
     has_labels = None
 
     for batch in data_loader:
-        # Handle both dict and tuple/list batch formats
+        # 同时兼容 dict、tuple、list 这几种 batch 形式
         if isinstance(batch, dict):
             images = batch["image"].to(device)
             labels = batch.get("label", None)
@@ -77,9 +78,9 @@ def knn_evaluate(
     temperature: float = 0.07,
     num_classes: Optional[int] = None,
 ) -> dict:
-    """Weighted kNN classifier evaluation.
+    """加权 kNN 分类评估。
 
-    Uses cosine similarity with temperature-scaled voting.
+    使用余弦相似度，并通过 temperature 对投票权重进行缩放。
 
     Args:
         train_features: (N_train, D) reference features.
@@ -96,43 +97,43 @@ def knn_evaluate(
     if num_classes is None:
         num_classes = int(max(train_labels.max(), test_labels.max()) + 1)
 
-    # L2 normalize
+    # 做 L2 归一化
     train_features = F.normalize(train_features, dim=1)
     test_features = F.normalize(test_features, dim=1)
 
     correct = 0
     total = test_features.shape[0]
 
-    # Process in chunks to avoid OOM on large datasets
+    # 分块处理，避免大数据集导致显存/内存溢出
     chunk_size = 256
     for i in range(0, total, chunk_size):
-        chunk = test_features[i : i + chunk_size]
+        chunk = test_features[i: i + chunk_size]
 
-        # Cosine similarity
-        sim = chunk @ train_features.t()  # (chunk, N_train)
+        # 计算余弦相似度
+        sim = chunk @ train_features.t()
 
-        # Top-k
-        topk_sim, topk_idx = sim.topk(k, dim=1)  # (chunk, k)
-        topk_labels = train_labels[topk_idx]  # (chunk, k)
+        # 取 Top-k 近邻
+        topk_sim, topk_idx = sim.topk(k, dim=1)
+        topk_labels = train_labels[topk_idx]
 
-        # Temperature-weighted voting
-        weights = (topk_sim / temperature).exp()  # (chunk, k)
+        # 基于 temperature 的加权投票
+        weights = (topk_sim / temperature).exp()
         votes = torch.zeros(chunk.shape[0], num_classes, device=chunk.device)
         votes.scatter_add_(1, topk_labels, weights)
 
         preds = votes.argmax(dim=1)
-        correct += (preds == test_labels[i : i + chunk_size]).sum().item()
+        correct += (preds == test_labels[i: i + chunk_size]).sum().item()
 
     accuracy = correct / total
     return {"accuracy": accuracy, "num_samples": total}
 
 
 class LinearProbe(nn.Module):
-    """Linear probe for evaluating frozen features.
+    """用于评估冻结特征的线性探针。
 
-    Trains a single linear layer on top of frozen backbone features.
+    在冻结 backbone 特征之上训练一个线性层。
 
-    Usage:
+    用法：
         features, labels = extract_features(backbone, train_loader)
         probe = LinearProbe(embed_dim, num_classes)
         probe.fit(features, labels, epochs=100)
@@ -155,19 +156,7 @@ class LinearProbe(nn.Module):
         batch_size: int = 256,
         verbose: bool = True,
     ) -> list:
-        """Train the linear probe.
-
-        Args:
-            features: (N, D) frozen features.
-            labels: (N,) integer labels.
-            epochs: Training epochs.
-            lr: Learning rate.
-            batch_size: Batch size.
-            verbose: Print progress.
-
-        Returns:
-            List of per-epoch loss values.
-        """
+        """训练线性探针。"""
         device = next(self.parameters()).device
         features = features.to(device)
         labels = labels.to(device)
@@ -186,7 +175,7 @@ class LinearProbe(nn.Module):
             count = 0
 
             for i in range(0, n, batch_size):
-                idx = perm[i : i + batch_size]
+                idx = perm[i: i + batch_size]
                 logits = self(features[idx])
                 loss = criterion(logits, labels[idx])
 
@@ -208,11 +197,7 @@ class LinearProbe(nn.Module):
 
     @torch.no_grad()
     def evaluate(self, features: torch.Tensor, labels: torch.Tensor) -> dict:
-        """Evaluate linear probe accuracy.
-
-        Returns:
-            Dict with "accuracy" and "num_samples".
-        """
+        """评估线性探针的准确率。"""
         device = next(self.parameters()).device
         self.eval()
         logits = self(features.to(device))

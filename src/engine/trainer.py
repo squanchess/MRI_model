@@ -1,11 +1,11 @@
 """
-DINO Trainer for MRI pretraining.
+MRI 预训练用的 DINO Trainer。
 
-Refactored from SPECTRE's pretrain_dino.py (MIT License):
-  - Extracted training loop into Trainer class
-  - Replaced multi-CT-dataset dataloader with direct IXIDataset construction
-  - Kept all DINO training logic: cosine LR/WD/momentum, EMA, gradient clipping,
-    cancel_last_layer_gradients, checkpoint save/resume
+基于 SPECTRE 的 `pretrain_dino.py`（MIT License）重构而来：
+  - 将训练循环抽离到 Trainer 类中
+  - 将多 CT 数据集的数据加载逻辑替换为直接构造 IXIDataset
+  - 保留完整的 DINO 训练流程：余弦 LR/WD/momentum、EMA、梯度裁剪、
+    cancel_last_layer_gradients、checkpoint 保存与恢复
 """
 import os
 import time
@@ -13,26 +13,26 @@ from itertools import chain
 
 import torch
 import torch.nn as nn
+from accelerate import Accelerator, DataLoaderConfiguration
 from torch.optim import AdamW
 from torch.utils.data import DataLoader
-from accelerate import Accelerator, DataLoaderConfiguration
 
-from src.models import vit_small_patch16_96, vit_base_patch16_96, vit_base_rope_patch16_96
-from src.models import DINO, DINOLoss, GramLoss
-from src.data import IXIDataset, DINOTransform
+from src.data import DINOTransform, IXIDataset
 from src.data.collate import collate_dino
+from src.models import DINO, DINOLoss, GramLoss
+from src.models import vit_base_patch16_96, vit_base_rope_patch16_96, vit_small_patch16_96
 from src.utils import (
-    update_momentum,
-    save_state,
-    load_state,
     cosine_schedule,
     cosine_warmup_schedule,
+    load_state,
+    save_state,
+    update_momentum,
 )
-from src.utils.param_groups import get_param_groups_with_decay
 from src.utils.misc import fix_random_seeds
+from src.utils.param_groups import get_param_groups_with_decay
 
 
-# Registry of available ViT architectures
+# 可用 ViT 架构注册表
 _ARCHITECTURES = {
     "vit_small_patch16_96": vit_small_patch16_96,
     "vit_base_patch16_96": vit_base_patch16_96,
@@ -41,19 +41,22 @@ _ARCHITECTURES = {
 
 
 class Trainer:
-    """DINO pretraining trainer.
+    """DINO 预训练器。
 
-    Handles the full training loop: model construction, data loading,
-    optimizer setup, training iterations, checkpointing, and logging.
+    负责完整训练流程，包括模型构建、数据加载、优化器初始化、
+    训练迭代、checkpoint 管理与日志记录。
     """
 
     def __init__(self, cfg):
+        # 固定配置与随机种子
         self.cfg = cfg
         fix_random_seeds(cfg.train.seed)
 
         dataloader_config = DataLoaderConfiguration(
             non_blocking=cfg.train.pin_memory,
         )
+
+        # 使用 Hugging Face Accelerate 管理训练
         self.accelerator = Accelerator(
             gradient_accumulation_steps=cfg.train.grad_accum_steps,
             log_with="wandb" if cfg.train.log_wandb else None,
@@ -70,8 +73,10 @@ class Trainer:
         self.print = self.accelerator.print
 
     def build_dataloader(self):
+        # 构建数据加载器（MRI -> batch）
         cfg = self.cfg
 
+        # 定义数据增强与预处理 transform
         transform = DINOTransform(
             num_base_patches=cfg.model.num_base_patches,
             global_views_size=tuple(cfg.model.global_views_size),
@@ -86,6 +91,7 @@ class Trainer:
         if sites is not None:
             sites = list(sites)
 
+        # 构造数据集
         dataset = IXIDataset(
             data_dir=cfg.train.data_dir,
             transform=transform,
@@ -94,6 +100,7 @@ class Trainer:
         )
         self.print(f"Dataset: {len(dataset)} volumes")
 
+        # 构造 DataLoader
         data_loader = DataLoader(
             dataset,
             batch_size=cfg.train.batch_size_per_gpu,
@@ -115,7 +122,7 @@ class Trainer:
                 f"Available: {list(_ARCHITECTURES.keys())}"
             )
 
-        # DINOv3 features: register tokens + RoPE coord augmentations
+        # DINOv3 特性：register tokens + RoPE 坐标增强
         backbone_kwargs = dict(num_classes=0, dynamic_img_size=True)
 
         reg_tokens = cfg.model.get("reg_tokens", 0)
@@ -123,7 +130,7 @@ class Trainer:
             backbone_kwargs["reg_tokens"] = reg_tokens
             self.print(f"Using {reg_tokens} register tokens (DINOv3)")
 
-        # RoPE coordinate augmentations (DINOv3 style)
+        # RoPE 坐标增强（DINOv3 风格）
         rope_kwargs = {}
         if cfg.model.get("rope_shift_coords") is not None:
             rope_kwargs["shift_coords"] = cfg.model.rope_shift_coords
@@ -173,7 +180,7 @@ class Trainer:
         cfg = self.cfg
         os.makedirs(cfg.train.output_dir, exist_ok=True)
 
-        # Build
+        # 构建训练组件
         data_loader = self.build_dataloader()
         model = self.build_model()
         criterion = DINOLoss(
@@ -184,8 +191,17 @@ class Trainer:
             student_temp=cfg.model.student_temp,
             center_momentum=cfg.model.center_momentum,
         )
+        optimizer = self.build_optimizer(model)
 
-        # DINOv3: Gram Anchoring loss
+        # 准备分布式训练相关封装
+        model = nn.SyncBatchNorm.convert_sync_batchnorm(model)
+        model, data_loader, criterion, optimizer = self.accelerator.prepare(
+            model, data_loader, criterion, optimizer,
+        )
+        unwrapped = self.accelerator.unwrap_model(model)
+        gram_teacher = None
+
+        # DINOv3：Gram Anchoring 损失
         gram_cfg = cfg.get("gram", {})
         use_gram = gram_cfg.get("enabled", False)
         if use_gram:
@@ -199,9 +215,13 @@ class Trainer:
             gram_update_freq = gram_cfg.get("update_freq", 10000)
             gram_first_update = gram_cfg.get("first_update_step", 0)
             gram_max_updates = gram_cfg.get("max_updates", None)
-            # Gram teacher: frozen snapshot of EMA teacher, refreshed periodically
+            # Gram teacher：EMA teacher 的冻结快照，按周期刷新
             from copy import deepcopy
-            gram_teacher = deepcopy(model.backbone_teacher if hasattr(model, 'backbone_teacher') else unwrapped.backbone_teacher)
+            gram_teacher = deepcopy(model.backbone_teacher if hasattr(model, "backbone_teacher") else unwrapped.backbone_teacher)
+            gram_teacher.eval()
+            gram_teacher = gram_teacher.to(self.accelerator.device)
+            for p in gram_teacher.parameters():
+                p.requires_grad = False
             from src.utils.modeling import deactivate_requires_grad_and_to_eval
             deactivate_requires_grad_and_to_eval(gram_teacher)
             gram_update_count = 0
@@ -210,16 +230,8 @@ class Trainer:
         else:
             gram_criterion = None
             self.print("Gram Anchoring: disabled")
-        optimizer = self.build_optimizer(model)
 
-        # Prepare distributed
-        model = nn.SyncBatchNorm.convert_sync_batchnorm(model)
-        model, data_loader, criterion, optimizer = self.accelerator.prepare(
-            model, data_loader, criterion, optimizer,
-        )
-        unwrapped = self.accelerator.unwrap_model(model)
-
-        # Resume
+        # 从 checkpoint 恢复
         start_epoch = 0
         if cfg.train.resume_ckp:
             ckpt_path = os.path.join(cfg.train.output_dir, "checkpoint.pt")
@@ -237,7 +249,7 @@ class Trainer:
             f"{total_steps} total"
         )
 
-        # --- Training loop ---
+        # --- 训练主循环 ---
         global_step = start_epoch * len(data_loader)
         t0 = time.time()
 
@@ -247,7 +259,7 @@ class Trainer:
 
             for batch in data_loader:
                 with self.accelerator.accumulate(model):
-                    # Schedule LR / WD / momentum
+                    # 调度学习率、权重衰减和动量
                     lr = cosine_warmup_schedule(
                         global_step, max_steps=total_steps,
                         start_value=cfg.optim.lr, end_value=cfg.optim.min_lr,
@@ -268,7 +280,7 @@ class Trainer:
                     update_momentum(unwrapped.backbone_student, unwrapped.backbone_teacher, mom)
                     update_momentum(unwrapped.head_student, unwrapped.head_teacher, mom)
 
-                    # Forward
+                    # 前向计算
                     gv = batch["global_views"]
                     lv = batch["local_views"]
                     teacher_out, student_out = model(global_views=gv, local_views=lv)
@@ -281,11 +293,11 @@ class Trainer:
                         epoch=epoch,
                     )
 
-                    # DINOv3: Gram Anchoring loss
+                    # DINOv3：计算 Gram Anchoring 损失
                     loss = dino_loss
                     gram_loss_val = 0.0
                     if use_gram:
-                        # Maybe update Gram teacher (periodic snapshot of EMA teacher)
+                        # 按需更新 Gram teacher（周期性拷贝 EMA teacher）
                         if global_step >= gram_first_update:
                             do_gram_update = False
                             if not gram_initialized:
@@ -301,26 +313,26 @@ class Trainer:
                                 gram_update_count += 1
                                 self.print(f"  Gram Teacher updated (#{gram_update_count}) at step {global_step}")
 
-                        # Compute Gram loss on student vs Gram teacher patch tokens
+                        # 计算 student 与 Gram teacher 的 patch token Gram loss
                         if gram_initialized:
-                            # Student patch features (pre-head, from global views only)
+                            # Student 的 patch 特征（head 之前，仅使用全局视图）
                             with torch.no_grad():
                                 student_features = unwrapped.backbone_student(gv).flatten(start_dim=1)
-                            # Reshape: student_features is (B, embed_dim) after pooling
-                            # We need pre-pooling patch tokens. Use forward_features instead:
-                            student_feat_full = unwrapped.backbone_student.forward_features(gv)  # (B, seq_len, D)
+                            # backbone 前向默认返回池化后的特征，这里需要池化前的 patch token，
+                            # 因此改用 forward_features：
+                            student_feat_full = unwrapped.backbone_student.forward_features(gv)
                             n_prefix = unwrapped.backbone_student.num_prefix_tokens
-                            student_patches = student_feat_full[:, n_prefix:]  # (B, P, D)
+                            student_patches = student_feat_full[:, n_prefix:]
 
                             with torch.no_grad():
-                                gram_feat_full = gram_teacher.forward_features(gv)  # (B, seq_len, D)
-                                gram_patches = gram_feat_full[:, n_prefix:]  # (B, P, D)
+                                gram_feat_full = gram_teacher.forward_features(gv)
+                                gram_patches = gram_feat_full[:, n_prefix:]
 
                             g_loss = gram_criterion(student_patches, gram_patches, img_level=True)
                             loss = loss + gram_loss_weight * g_loss
                             gram_loss_val = g_loss.item()
 
-                    # Backward
+                    # 反向传播
                     self.accelerator.backward(loss)
 
                     if cfg.optim.clip_grad_norm > 0 and self.accelerator.sync_gradients:
@@ -335,7 +347,7 @@ class Trainer:
                     optimizer.step()
                     optimizer.zero_grad()
 
-                    # Log
+                    # 记录日志
                     dt = time.time() - t0
                     t0 = time.time()
                     if global_step % cfg.train.log_freq == 0:
@@ -359,7 +371,7 @@ class Trainer:
 
                     global_step += 1
 
-            # Checkpoint
+            # 保存 checkpoint
             save_state(
                 os.path.join(cfg.train.output_dir, "checkpoint.pt"),
                 epoch=epoch + 1,

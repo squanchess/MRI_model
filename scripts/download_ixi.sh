@@ -1,7 +1,7 @@
 #!/bin/bash
-# Download IXI T1 dataset into data/IXI-T1/
+# 将 IXI T1 数据集下载到 data/IXI-T1/
 #
-# Usage:
+# 用法：
 #   bash scripts/download_ixi.sh
 #   bash scripts/download_ixi.sh /custom/path
 

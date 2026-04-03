@@ -1,33 +1,33 @@
 """
-Model utility functions.
+模型相关工具函数。
 
-Copied from SPECTRE (MIT License) — only functions needed for DINO + ViT.
-Removed SigLIP-specific helpers (last_token_pool, cat_keep_shapes, etc.).
+代码改自 SPECTRE（MIT License），仅保留 DINO 与 ViT 所需部分，
+并移除了 SigLIP 相关辅助函数（如 `last_token_pool`、`cat_keep_shapes` 等）。
 """
 from __future__ import annotations
 
 import math
-from typing import List, Tuple, Optional, Union
+from typing import List, Optional, Tuple, Union
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import numpy as np
 
 
 # ---------------------------------------------------------------------------
-# Teacher-student helpers (DINO EMA)
+# Teacher-student 辅助函数（DINO EMA）
 # ---------------------------------------------------------------------------
 
 def deactivate_requires_grad_and_to_eval(model: nn.Module):
-    """Freeze all parameters and set model to eval mode."""
+    """冻结所有参数，并将模型切换到 eval 模式。"""
     for param in model.parameters():
         param.requires_grad = False
     model.eval()
 
 
 def activate_requires_grad_and_to_train(model: nn.Module):
-    """Unfreeze all parameters and set model to train mode."""
+    """解冻所有参数，并将模型切换到 train 模式。"""
     for param in model.parameters():
         param.requires_grad = True
     model.train()
@@ -35,7 +35,7 @@ def activate_requires_grad_and_to_train(model: nn.Module):
 
 @torch.no_grad()
 def update_momentum(model: nn.Module, model_ema: nn.Module, m: float):
-    """EMA update: model_ema = m * model_ema + (1 - m) * model."""
+    """执行 EMA 更新：`model_ema = m * model_ema + (1 - m) * model`。"""
     for model_ema, model in zip(model_ema.parameters(), model.parameters()):
         model_ema.data = model_ema.data * m + model.data * (1.0 - m)
 
@@ -45,7 +45,7 @@ def update_drop_path_rate(
     drop_path_rate: float,
     mode: str = "linear",
 ) -> None:
-    """Update the drop path rate across all blocks."""
+    """更新所有 block 上的 drop path 概率。"""
     from timm.layers import DropPath
 
     total_depth = len(model.blocks)
@@ -67,7 +67,7 @@ def update_drop_path_rate(
 
 
 # ---------------------------------------------------------------------------
-# Token manipulation helpers
+# Token 操作辅助函数
 # ---------------------------------------------------------------------------
 
 def repeat_token(token: torch.Tensor, size: Tuple[int, int]) -> torch.Tensor:
@@ -109,7 +109,7 @@ def mask_bool(
 
 
 def patchify(images: torch.Tensor, patch_size: Tuple[int, int, int]) -> torch.Tensor:
-    """Convert a batch of images into patches.
+    """将一批图像切分为 patch 序列。
 
     Args:
         images: (B, C, H, W, D)
@@ -162,7 +162,7 @@ def random_token_mask(
 
 
 # ---------------------------------------------------------------------------
-# Position embedding resampling (3D trilinear interpolation)
+# 位置编码重采样（3D 三线性插值）
 # ---------------------------------------------------------------------------
 
 def resample_abs_pos_embed(
@@ -170,9 +170,9 @@ def resample_abs_pos_embed(
         new_size: List[int],
         old_size: List[int],
         num_prefix_tokens: int = 1,
-        interpolation: str = 'trilinear',
+        interpolation: str = "trilinear",
 ):
-    """Resample absolute position embeddings via 3D interpolation."""
+    """通过 3D 插值重采样绝对位置编码。"""
     num_pos_tokens = posemb.shape[1]
     num_new_tokens = new_size[0] * new_size[1] * new_size[2] + num_prefix_tokens
     if num_new_tokens == num_pos_tokens and new_size[0] == new_size[1]:
@@ -199,7 +199,7 @@ def resample_abs_pos_embed(
 def resample_abs_pos_embed_nhwdc(
         posemb: torch.Tensor,
         new_size: List[int],
-        interpolation: str = 'trilinear',
+        interpolation: str = "trilinear",
 ):
     if new_size[0] == posemb.shape[-4] and new_size[1] == posemb.shape[-3] and new_size[2] == posemb.shape[-2]:
         return posemb
@@ -217,9 +217,9 @@ def resample_abs_pos_embed_nhwdc(
 def resample_patch_embed(
         patch_embed,
         new_size: List[int],
-        interpolation: str = 'trilinear',
+        interpolation: str = "trilinear",
 ):
-    """Resample patch embedding kernel to a new patch size."""
+    """将 patch embedding 卷积核重采样到新的 patch 尺寸。"""
     try:
         from torch import vmap
     except ImportError:
@@ -241,7 +241,7 @@ def resample_patch_embed(
         mat = []
         for i in range(np.prod(_old_size)):
             basis_vec = np.zeros(_old_size)
-            basis_vec[np.unravel_index(i, _old_size)] = 1.
+            basis_vec[np.unravel_index(i, _old_size)] = 1.0
             mat.append(resize(basis_vec, _new_size).reshape(-1))
         return np.stack(mat).T
 
@@ -261,7 +261,7 @@ def resample_patch_embed(
 
 
 # ---------------------------------------------------------------------------
-# Feature index selection and pooling
+# 特征索引选择与池化
 # ---------------------------------------------------------------------------
 
 def feature_take_indices(
@@ -290,24 +290,24 @@ def feature_take_indices(
 
 def global_pool_nlc(
         x: torch.Tensor,
-        pool_type: str = 'token',
+        pool_type: str = "token",
         num_prefix_tokens: int = 1,
         reduce_include_prefix: bool = False,
 ):
     if not pool_type:
         return x
 
-    if pool_type == 'token':
+    if pool_type == "token":
         x = x[:, 0]
     else:
         x = x if reduce_include_prefix else x[:, num_prefix_tokens:]
-        if pool_type == 'avg':
+        if pool_type == "avg":
             x = x.mean(dim=1)
-        elif pool_type == 'avgmax':
+        elif pool_type == "avgmax":
             x = 0.5 * (x.amax(dim=1) + x.mean(dim=1))
-        elif pool_type == 'max':
+        elif pool_type == "max":
             x = x.amax(dim=1)
         else:
-            assert not pool_type, f'Unknown pool type {pool_type}'
+            assert not pool_type, f"Unknown pool type {pool_type}"
 
     return x
