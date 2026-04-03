@@ -9,7 +9,7 @@ from .vision_transformer import (
 )
 from .dino import DINO, DINOv2, MaskedVisionTransformer
 from .dino_head import DINOProjectionHead
-from .losses import DINOLoss, iBOTPatchLoss, KoLeoLoss, Center
+from .losses import DINOLoss, iBOTPatchLoss, KoLeoLoss, GramLoss, Center
 
 __all__ = [
     # ViT

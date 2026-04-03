@@ -1,1 +1,2 @@
 python train.py --output_dir outputs/debug --opts train.batch_size_per_gpu=2 optim.epochs=3 train.num_workers=2 model.num_base_patches=2 optim.warmup_epochs=1
+python train.py --output_dir outputs/debug --opts train.data_dir=data/IXI-T1 optim.epochs=3 optim.warmup_epochs=1 train.batch_size_per_gpu=2
