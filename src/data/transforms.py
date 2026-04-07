@@ -7,24 +7,30 @@ CT (SPECTRE)                          MRI（本文件）
 ------------------------------------------------------------
 ScaleIntensityRange(-1000, 1000)   ->  百分位裁剪 + Z-score 归一化
 Spacing(0.5, 0.5, 1.0)             ->  Spacing(1.0, 1.0, 1.0) 各向同性
-CenterCrop(512, 512, 384)          ->  CenterCrop(192, 224, 192) 聚焦脑区
+CenterCrop(512, 512, 384)          ->  CropForeground / CenterCrop 可选
 Global crop (128, 128, 64)         ->  Global crop (96, 96, 96) 各向同性
 Local crop (48, 48, 24)            ->  Local crop (48, 48, 48) 各向同性
 RandScaleIntensityRange (HU)       ->  RandScaleIntensity（通用）
 
+全身 MRI 扩展：
+  - 新增 use_foreground_crop 选项，替代 CenterSpatialCrop
+  - roi_size 为可选参数；设为 None 时跳过裁剪步骤
+  - 所有增强操作解剖无关，无需按体部定制
+
 整体流程沿用了 SPECTRE 的结构：
-  Load -> Normalize -> Reorient -> Resample -> CenterCrop -> Pad ->
+  Load -> Normalize -> Reorient -> Resample -> Crop -> Pad ->
   RandSpatialCropSamples -> DINORandomCropTransform
   （生成全局/局部裁剪，并执行 resize 与增强）
 """
 from copy import deepcopy
-from typing import Any, Hashable, List, Mapping, Tuple
+from typing import Any, Hashable, List, Mapping, Optional, Tuple
 
 import torch
 from monai.config import KeysCollection
 from monai.transforms import (
     CenterSpatialCropd,
     Compose,
+    CropForegroundd,
     EnsureChannelFirstd,
     EnsureTyped,
     LazyTransform,
@@ -59,22 +65,27 @@ class DINOTransform(Compose):
     数据流：
         1. 加载 NIfTI，并补充通道维
         2. 执行百分位强度裁剪（0.5%-99.5%），归一化到 [0, 1]
-        3. 重定向到 RAS 坐标系，并重采样到 1mm 各向同性体素
-        4. 中心裁剪到固定 ROI（聚焦脑区）
+        3. 重定向到 RAS 坐标系，并重采样到目标体素间距
+        4. 裁剪策略：
+           - use_foreground_crop=True: CropForeground（全身 MRI）
+           - use_foreground_crop=False: CenterSpatialCrop（脑部 MRI 兼容）
         5. 空间补边，确保后续裁剪最小尺寸足够
         6. 从体数据中随机采样多个基础 patch
         7. 针对每个基础 patch，生成 2 个全局裁剪和 N 个局部裁剪，
            并附加随机 resize 与增强
 
     参数：
-        num_base_patches: 每个体数据采样多少个基础 patch，用于提升 I/O 效率。
-        global_views_size: 全局视图尺寸，同时送入 teacher 与 student。
-        local_views_size: 局部视图尺寸，仅送入 student。
-        local_views_scale: 局部裁剪的随机尺度范围 (min, max)。
+        num_base_patches: 每个体数据采样多少个基础 patch。
+        global_views_size: 全局视图尺寸。
+        local_views_size: 局部视图尺寸。
+        local_views_scale: 局部裁剪的随机尺度范围。
         num_local_views: 每个基础 patch 生成多少个局部视图。
-        roi_size: 聚焦脑区的中心裁剪大小。
+        roi_size: 裁剪目标尺寸（CenterSpatialCrop 模式）或最小尺寸保证。
+                  设为 None 时跳过裁剪，仅做 SpatialPad。
         spacing: 目标体素间距（mm）。
         dtype: "float32" 或 "float16"。
+        use_foreground_crop: 使用前景裁剪替代中心裁剪。
+        foreground_margin: 前景裁剪保留的边缘体素数。
     """
 
     def __init__(
@@ -84,9 +95,11 @@ class DINOTransform(Compose):
         local_views_size: Tuple[int, int, int] = (48, 48, 48),
         local_views_scale: Tuple[float, float] = (0.25, 0.5),
         num_local_views: int = 6,
-        roi_size: Tuple[int, int, int] = (192, 224, 192),
+        roi_size: Optional[Tuple[int, int, int]] = (192, 224, 192),
         spacing: Tuple[float, float, float] = (1.0, 1.0, 1.0),
         dtype: str = "float32",
+        use_foreground_crop: bool = False,
+        foreground_margin: int = 10,
     ):
         assert dtype in ["float16", "float32"]
 
@@ -95,15 +108,14 @@ class DINOTransform(Compose):
             int(sz * (1 / local_views_scale[0])) for sz in local_views_size
         )  # 例如：(48 / 0.25) = (192, 192, 192)
 
-        super().__init__([
-            # --- 确定性预处理 ---
+        # --- 构建确定性预处理步骤 ---
+        deterministic_transforms = [
             LoadImaged(keys=("image",)),
             EnsureChannelFirstd(
                 keys=("image",),
                 channel_dim="no_channel",
             ),
-            # MRI 强度归一化：
-            # 第一步：用百分位裁剪极端值，削弱背景和伪影影响
+            # MRI 强度归一化：百分位裁剪极端值
             ScaleIntensityRangePercentilesd(
                 keys=("image",),
                 lower=0.5,
@@ -114,18 +126,35 @@ class DINOTransform(Compose):
             ),
             # 重定向到标准 RAS 朝向
             Orientationd(keys=("image",), axcodes="RAS"),
-            # 重采样到 1mm 各向同性体素
+            # 重采样到目标体素间距
             Spacingd(
                 keys=("image",),
                 pixdim=spacing,
                 mode=("bilinear",),
             ),
-            # 中心裁剪以聚焦脑区，同时去除大部分背景
-            CenterSpatialCropd(
-                keys=("image",),
-                roi_size=roi_size,
-            ),
-            # 如果体数据小于基础裁剪尺寸，则进行补边
+        ]
+
+        # --- 裁剪策略 ---
+        if use_foreground_crop:
+            # 全身 MRI：前景裁剪，自动去除背景空气
+            deterministic_transforms.append(
+                CropForegroundd(
+                    keys=("image",),
+                    source_key="image",
+                    margin=foreground_margin,
+                )
+            )
+        elif roi_size is not None:
+            # 脑部 MRI 兼容模式：中心裁剪
+            deterministic_transforms.append(
+                CenterSpatialCropd(
+                    keys=("image",),
+                    roi_size=roi_size,
+                )
+            )
+
+        # 补边以确保基础裁剪尺寸足够
+        deterministic_transforms.extend([
             SpatialPadd(
                 keys=("image",),
                 spatial_size=base_crop_size,
@@ -135,8 +164,10 @@ class DINOTransform(Compose):
                 dtype=getattr(torch, dtype),
                 device="cpu",
             ),
-            # --- 随机采样 ---
-            # 从体数据中随机采样多个基础 patch
+        ])
+
+        # --- 随机采样 + DINO 多裁剪 ---
+        random_transforms = [
             RandSpatialCropSamplesd(
                 keys=("image",),
                 num_samples=num_base_patches,
@@ -144,7 +175,6 @@ class DINOTransform(Compose):
                 random_size=False,
                 random_center=True,
             ),
-            # DINO 多裁剪：生成全局与局部视图，并执行增强
             DINORandomCropTransformd(
                 keys=("image",),
                 base_crop_size=base_crop_size,
@@ -157,7 +187,9 @@ class DINOTransform(Compose):
             SelectItemsd(
                 keys=("image_global_views", "image_local_views"),
             ),
-        ])
+        ]
+
+        super().__init__(deterministic_transforms + random_transforms)
 
 
 class DINORandomCropTransformd(Randomizable, MapTransform, LazyTransform):
@@ -229,11 +261,11 @@ class DINORandomCropTransformd(Randomizable, MapTransform, LazyTransform):
 
         # 更适合 MRI 的增强方式
         self.augmentor = Compose([
-            # 随机翻转（脑部在左右方向上近似对称）
+            # 随机翻转
             RandFlip(spatial_axis=0, prob=0.5),
             RandFlip(spatial_axis=1, prob=0.5),
             RandFlip(spatial_axis=2, prob=0.5),
-            # 模糊 / 锐化（MRI 使用各向同性 sigma）
+            # 模糊 / 锐化（各向同性 sigma）
             OneOf([
                 RandGaussianSharpen(
                     sigma1_x=(1.0, 2.0), sigma1_y=(1.0, 2.0), sigma1_z=(1.0, 2.0),

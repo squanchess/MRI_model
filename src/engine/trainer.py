@@ -3,7 +3,8 @@ MRI 预训练用的 DINO Trainer。
 
 基于 SPECTRE 的 `pretrain_dino.py`（MIT License）重构而来：
   - 将训练循环抽离到 Trainer 类中
-  - 将多 CT 数据集的数据加载逻辑替换为直接构造 IXIDataset
+  - 支持单数据源（IXIDataset / MRIDataset）和多数据源（MultiSourceMRIDataset）
+  - 支持区域均衡采样（WeightedRandomSampler）
   - 保留完整的 DINO 训练流程：余弦 LR/WD/momentum、EMA、梯度裁剪、
     cancel_last_layer_gradients、checkpoint 保存与恢复
 """
@@ -17,7 +18,12 @@ from accelerate import Accelerator, DataLoaderConfiguration
 from torch.optim import AdamW
 from torch.utils.data import DataLoader
 
-from src.data import DINOTransform, IXIDataset
+from src.data import (
+    DINOTransform,
+    IXIDataset,
+    MRIDataset,
+    MultiSourceMRIDataset,
+)
 from src.data.collate import collate_dino
 from src.models import DINO, DINOLoss, GramLoss
 from src.models import vit_base_patch16_96, vit_base_rope_patch16_96, vit_small_patch16_96
@@ -45,6 +51,11 @@ class Trainer:
 
     负责完整训练流程，包括模型构建、数据加载、优化器初始化、
     训练迭代、checkpoint 管理与日志记录。
+
+    支持三种数据加载模式：
+      1. 单数据目录（str）：自动判断是否为 IXI 格式
+      2. 多数据目录（dict）：使用 MultiSourceMRIDataset
+      3. 多数据目录（list）：同上
     """
 
     def __init__(self, cfg):
@@ -72,11 +83,13 @@ class Trainer:
 
         self.print = self.accelerator.print
 
-    def build_dataloader(self):
-        # 构建数据加载器（MRI -> batch）
+    def _build_transform(self):
+        """构建 DINO 多裁剪变换流水线。"""
         cfg = self.cfg
 
-        # 定义数据增强与预处理 transform
+        # 判断是否启用前景裁剪
+        use_foreground_crop = cfg.model.get("use_foreground_crop", False)
+
         transform = DINOTransform(
             num_base_patches=cfg.model.num_base_patches,
             global_views_size=tuple(cfg.model.global_views_size),
@@ -85,19 +98,83 @@ class Trainer:
             num_local_views=cfg.model.num_local_views,
             roi_size=tuple(cfg.model.roi_size),
             spacing=tuple(cfg.model.spacing),
+            use_foreground_crop=use_foreground_crop,
         )
+        return transform
 
-        sites = cfg.train.get("sites", None)
-        if sites is not None:
-            sites = list(sites)
+    def build_dataloader(self):
+        """构建数据加载器。
 
-        # 构造数据集
-        dataset = IXIDataset(
-            data_dir=cfg.train.data_dir,
-            transform=transform,
-            sites=sites,
-            fraction=cfg.train.data_fraction,
-        )
+        支持三种配置方式：
+          1. train.data_dirs（dict/list）：多数据源，使用 MultiSourceMRIDataset
+          2. train.data_dir（str）：单数据源
+          3. 同时存在时 data_dirs 优先
+        """
+        cfg = self.cfg
+        transform = self._build_transform()
+
+        # 判断数据源类型
+        data_dirs = cfg.train.get("data_dirs", None)
+        sampler = None
+
+        if data_dirs is not None:
+            # --- 多数据源模式 ---
+            if hasattr(data_dirs, "items"):
+                # OmegaConf DictConfig -> dict
+                data_dirs_dict = dict(data_dirs)
+            elif isinstance(data_dirs, (list, tuple)):
+                data_dirs_dict = {
+                    os.path.basename(d.rstrip("/")): d for d in data_dirs
+                }
+            else:
+                raise ValueError(
+                    f"train.data_dirs 格式错误: {type(data_dirs)}，"
+                    f"期望 dict 或 list"
+                )
+
+            multi_dataset = MultiSourceMRIDataset(
+                data_dirs=data_dirs_dict,
+                transform=transform,
+                fraction=cfg.train.data_fraction,
+            )
+            self.print(multi_dataset.summary())
+            dataset = multi_dataset.dataset
+
+            # 区域均衡采样
+            balance = cfg.train.get("balance_regions", False)
+            if balance:
+                region_weights = cfg.train.get("region_weights", None)
+                if region_weights is not None:
+                    region_weights = dict(region_weights)
+                sampler = multi_dataset.get_balanced_sampler(
+                    weights=region_weights,
+                )
+                self.print(
+                    f"启用区域均衡采样，权重: "
+                    f"{region_weights or '按数据量倒数均衡'}"
+                )
+        else:
+            # --- 单数据源模式 ---
+            data_dir = cfg.train.data_dir
+
+            # 向后兼容：检查是否有 IXI 站点筛选
+            sites = cfg.train.get("sites", None)
+            if sites is not None:
+                # 使用 IXI 专用数据集
+                dataset = IXIDataset(
+                    data_dir=data_dir,
+                    transform=transform,
+                    sites=list(sites),
+                    fraction=cfg.train.data_fraction,
+                )
+            else:
+                # 使用通用 MRI 数据集
+                dataset = MRIDataset(
+                    data_dir=data_dir,
+                    transform=transform,
+                    fraction=cfg.train.data_fraction,
+                )
+
         self.print(f"Dataset: {len(dataset)} volumes")
 
         # 构造 DataLoader
@@ -106,7 +183,9 @@ class Trainer:
             batch_size=cfg.train.batch_size_per_gpu,
             num_workers=cfg.train.num_workers,
             pin_memory=cfg.train.pin_memory,
-            shuffle=True,
+            # 有 sampler 时不能用 shuffle
+            shuffle=(sampler is None),
+            sampler=sampler,
             drop_last=cfg.train.drop_last,
             persistent_workers=cfg.train.persistent_workers and cfg.train.num_workers > 0,
             collate_fn=collate_dino,
@@ -315,11 +394,8 @@ class Trainer:
 
                         # 计算 student 与 Gram teacher 的 patch token Gram loss
                         if gram_initialized:
-                            # Student 的 patch 特征（head 之前，仅使用全局视图）
                             with torch.no_grad():
                                 student_features = unwrapped.backbone_student(gv).flatten(start_dim=1)
-                            # backbone 前向默认返回池化后的特征，这里需要池化前的 patch token，
-                            # 因此改用 forward_features：
                             student_feat_full = unwrapped.backbone_student.forward_features(gv)
                             n_prefix = unwrapped.backbone_student.num_prefix_tokens
                             student_patches = student_feat_full[:, n_prefix:]
