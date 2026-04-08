@@ -12,7 +12,7 @@ from omegaconf import OmegaConf
 
 # 项目根目录：相对于 src/utils/config.py 向上三级
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-DEFAULT_CONFIG_PATH = PROJECT_ROOT / "configs" / "pretrain_wholebody.yaml"
+DEFAULT_CONFIG_PATH = PROJECT_ROOT / "configs" / "pretrain.yaml"
 
 
 def load_default_config() -> OmegaConf:

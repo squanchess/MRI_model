@@ -27,8 +27,17 @@ train:
 
   # --- 多数据源配置（可选，与 data_dir 二选一） ---
   # 当 data_dirs 存在时，优先于 data_dir
+  # 键名 = 区域名，值 = prepare_all_datasets.py 输出的各区域目录
+  # 只保留实际存在且有数据的区域，没有数据的区域请注释掉
   data_dirs:
-    IXI: /home2/Data/IXI
+    brain: /data/pretrain_ready/brain
+    cardiac: /data/pretrain_ready/cardiac
+    abdomen: /data/pretrain_ready/abdomen
+    prostate: /data/pretrain_ready/prostate
+    knee: /data/pretrain_ready/knee
+    spine: /data/pretrain_ready/spine
+    breast: /data/pretrain_ready/breast
+    # other: /data/pretrain_ready/other
 
   # --- 区域均衡采样 ---
   balance_regions: true            # 启用加权采样，防止大数据集主导训练
@@ -86,7 +95,7 @@ model:
   global_views_size: [96, 96, 96]
   local_views_size: [48, 48, 48]
   local_views_scale: [0.25, 0.5]
-  roi_size: [256, 256, 256]        # 增大以适应全身扫描
+  roi_size: null                   # 前景裁剪模式下不需要固定 ROI
   spacing: [1.0, 1.0, 1.0]        # 统一各向同性重采样
   use_foreground_crop: true        # 使用前景裁剪替代中心裁剪
 

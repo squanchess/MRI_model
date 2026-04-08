@@ -90,13 +90,17 @@ class Trainer:
         # 判断是否启用前景裁剪
         use_foreground_crop = cfg.model.get("use_foreground_crop", False)
 
+        # roi_size 可以为 None（使用前景裁剪时不需要固定 ROI）
+        raw_roi = cfg.model.get("roi_size", None)
+        roi_size = tuple(raw_roi) if raw_roi is not None else None
+
         transform = DINOTransform(
             num_base_patches=cfg.model.num_base_patches,
             global_views_size=tuple(cfg.model.global_views_size),
             local_views_size=tuple(cfg.model.local_views_size),
             local_views_scale=tuple(cfg.model.local_views_scale),
             num_local_views=cfg.model.num_local_views,
-            roi_size=tuple(cfg.model.roi_size),
+            roi_size=roi_size,
             spacing=tuple(cfg.model.spacing),
             use_foreground_crop=use_foreground_crop,
         )
