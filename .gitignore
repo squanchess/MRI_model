@@ -10,7 +10,6 @@ build/
 
 # ===== Data — never commit imaging data =====
 data/*
-!data/.gitkeep
 
 # ===== Outputs — checkpoints, logs, generated configs =====
 outputs/*

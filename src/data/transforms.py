@@ -136,7 +136,7 @@ class DINOTransform(Compose):
 
         # --- 裁剪策略 ---
         if use_foreground_crop:
-            # 全身 MRI：前景裁剪，自动去除背景空气
+            # 全身 MRI：前景裁剪，自动去除背景
             deterministic_transforms.append(
                 CropForegroundd(
                     keys=("image",),

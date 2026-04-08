@@ -25,6 +25,7 @@ def collate_dino(samples_list: List) -> dict:
     """
     collated_data = list_data_collate(samples_list)
 
+    # 所有样本在第0维拼接
     global_views = torch.cat(collated_data["image_global_views"], dim=0)
     local_views = torch.cat(collated_data["image_local_views"], dim=0)
 

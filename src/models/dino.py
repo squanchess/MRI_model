@@ -75,7 +75,7 @@ class DINO(nn.Module):
         deactivate_requires_grad_and_to_eval(self.head_teacher)
 
     @torch.no_grad()
-    def forward_teacher(
+    def forward_teacher(# teacher不参与反向传播
         self, 
         global_views: torch.Tensor
     ) -> torch.Tensor:

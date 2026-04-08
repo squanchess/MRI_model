@@ -12,7 +12,7 @@
 train:
   batch_size_per_gpu: 4            # 全身数据体积更大，适当减小 batch
   grad_accum_steps: 2              # 用梯度累积补偿 batch 大小
-  data_dir: /home2/Data/wholebody  # 统一数据目录（prepare_datasets.py 的输出）
+  data_dir: D:/rkj/MRI_model/data  # 统一数据目录（prepare_datasets.py 的输出）
   data_fraction: 1.0
   output_dir: outputs/dino_wholebody
   saveckp_freq: 10
@@ -27,14 +27,8 @@ train:
 
   # --- 多数据源配置（可选，与 data_dir 二选一） ---
   # 当 data_dirs 存在时，优先于 data_dir
-  # data_dirs:
-  #   brain: /home2/Data/wholebody/brain
-  #   cardiac: /home2/Data/wholebody/cardiac
-  #   abdomen: /home2/Data/wholebody/abdomen
-  #   prostate: /home2/Data/wholebody/prostate
-  #   knee: /home2/Data/wholebody/knee
-  #   spine: /home2/Data/wholebody/spine
-  #   breast: /home2/Data/wholebody/breast
+  data_dirs:
+    IXI: /home2/Data/IXI
 
   # --- 区域均衡采样 ---
   balance_regions: true            # 启用加权采样，防止大数据集主导训练
