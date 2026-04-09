@@ -1,5 +1,5 @@
 """
-MRI 预训练用的 DINO Trainer。
+MRI 预训练用的 DINO Trainer（性能优化版）。
 
 基于 SPECTRE 的 `pretrain_dino.py`（MIT License）重构而来：
   - 将训练循环抽离到 Trainer 类中
@@ -7,6 +7,13 @@ MRI 预训练用的 DINO Trainer。
   - 支持区域均衡采样（WeightedRandomSampler）
   - 保留完整的 DINO 训练流程：余弦 LR/WD/momentum、EMA、梯度裁剪、
     cancel_last_layer_gradients、checkpoint 保存与恢复
+
+性能优化：
+  - 混合精度训练（fp16/bf16），显存减半、速度翻倍
+  - torch.compile 自动优化模型图（PyTorch 2.0+）
+  - MONAI CacheDataset 缓存确定性预处理结果，消除重复 IO
+  - cudnn benchmark 自动选择最快卷积算法
+  - DataLoader prefetch_factor 预加载下一批数据
 """
 import os
 import time
@@ -20,6 +27,7 @@ from torch.utils.data import DataLoader
 
 from src.data import (
     DINOTransform,
+    SafeDINOTransform,
     IXIDataset,
     MRIDataset,
     MultiSourceMRIDataset,
@@ -47,21 +55,29 @@ _ARCHITECTURES = {
 
 
 class Trainer:
-    """DINO 预训练器。
+    """DINO 预训练器（性能优化版）。
 
     负责完整训练流程，包括模型构建、数据加载、优化器初始化、
     训练迭代、checkpoint 管理与日志记录。
 
-    支持三种数据加载模式：
-      1. 单数据目录（str）：自动判断是否为 IXI 格式
-      2. 多数据目录（dict）：使用 MultiSourceMRIDataset
-      3. 多数据目录（list）：同上
+    性能优化项：
+      - mixed_precision: "fp16" / "bf16" / "no"（配置文件控制）
+      - use_compile: 是否启用 torch.compile（PyTorch 2.0+）
+      - cache_rate: MONAI CacheDataset 的缓存比例（0.0-1.0）
+      - cudnn benchmark: 自动选择最快卷积实现
+      - prefetch_factor: DataLoader 预取批次数
     """
 
     def __init__(self, cfg):
         # 固定配置与随机种子
         self.cfg = cfg
         fix_random_seeds(cfg.train.seed)
+
+        # --- 性能优化：cudnn benchmark ---
+        torch.backends.cudnn.benchmark = True
+
+        # --- 混合精度配置 ---
+        mixed_precision = cfg.train.get("mixed_precision", "fp16")
 
         dataloader_config = DataLoaderConfiguration(
             non_blocking=cfg.train.pin_memory,
@@ -72,7 +88,14 @@ class Trainer:
             gradient_accumulation_steps=cfg.train.grad_accum_steps,
             log_with="wandb" if cfg.train.log_wandb else None,
             dataloader_config=dataloader_config,
+            mixed_precision=mixed_precision,
         )
+
+        if mixed_precision != "no":
+            self.accelerator.print(
+                f"Mixed precision: {mixed_precision} "
+                f"(~2x speed, ~0.5x memory)"
+            )
 
         if cfg.train.log_wandb:
             self.accelerator.init_trackers(
@@ -104,7 +127,8 @@ class Trainer:
             spacing=tuple(cfg.model.spacing),
             use_foreground_crop=use_foreground_crop,
         )
-        return transform
+        # 容错包装：损坏文件返回 None，不中断训练
+        return SafeDINOTransform(transform)
 
     def build_dataloader(self):
         """构建数据加载器。
@@ -113,6 +137,10 @@ class Trainer:
           1. train.data_dirs（dict/list）：多数据源，使用 MultiSourceMRIDataset
           2. train.data_dir（str）：单数据源
           3. 同时存在时 data_dirs 优先
+
+        性能优化：
+          - cache_rate > 0 时使用 MONAI CacheDataset 缓存确定性预处理
+          - prefetch_factor 控制 DataLoader 预加载批次数
         """
         cfg = self.cfg
         transform = self._build_transform()
@@ -121,10 +149,13 @@ class Trainer:
         data_dirs = cfg.train.get("data_dirs", None)
         sampler = None
 
+        # 是否使用缓存数据集
+        cache_rate = cfg.train.get("cache_rate", 0.0)
+        cache_num_workers = cfg.train.get("cache_num_workers", 4)
+
         if data_dirs is not None:
             # --- 多数据源模式 ---
             if hasattr(data_dirs, "items"):
-                # OmegaConf DictConfig -> dict
                 data_dirs_dict = dict(data_dirs)
             elif isinstance(data_dirs, (list, tuple)):
                 data_dirs_dict = {
@@ -140,6 +171,8 @@ class Trainer:
                 data_dirs=data_dirs_dict,
                 transform=transform,
                 fraction=cfg.train.data_fraction,
+                cache_rate=cache_rate,
+                cache_num_workers=cache_num_workers,
             )
             self.print(multi_dataset.summary())
             dataset = multi_dataset.dataset
@@ -160,39 +193,61 @@ class Trainer:
         else:
             # --- 单数据源模式 ---
             data_dir = cfg.train.data_dir
-
-            # 向后兼容：检查是否有 IXI 站点筛选
             sites = cfg.train.get("sites", None)
-            if sites is not None:
-                # 使用 IXI 专用数据集
-                dataset = IXIDataset(
-                    data_dir=data_dir,
+
+            if cache_rate > 0:
+                from monai.data import CacheDataset
+                from src.data.mri_dataset import _discover_nifti_files, _discover_ixi_files
+
+                if sites is not None:
+                    data_list = _discover_ixi_files(data_dir, sites=list(sites),
+                                                     fraction=cfg.train.data_fraction)
+                else:
+                    data_list = _discover_nifti_files(data_dir,
+                                                       fraction=cfg.train.data_fraction)
+
+                dataset = CacheDataset(
+                    data=data_list,
                     transform=transform,
-                    sites=list(sites),
-                    fraction=cfg.train.data_fraction,
+                    cache_rate=cache_rate,
+                    num_workers=cache_num_workers,
+                )
+                self.print(
+                    f"CacheDataset: cache_rate={cache_rate}, "
+                    f"workers={cache_num_workers}"
                 )
             else:
-                # 使用通用 MRI 数据集
-                dataset = MRIDataset(
-                    data_dir=data_dir,
-                    transform=transform,
-                    fraction=cfg.train.data_fraction,
-                )
+                if sites is not None:
+                    dataset = IXIDataset(
+                        data_dir=data_dir,
+                        transform=transform,
+                        sites=list(sites),
+                        fraction=cfg.train.data_fraction,
+                    )
+                else:
+                    dataset = MRIDataset(
+                        data_dir=data_dir,
+                        transform=transform,
+                        fraction=cfg.train.data_fraction,
+                    )
 
         self.print(f"Dataset: {len(dataset)} volumes")
 
-        # 构造 DataLoader
+        # DataLoader 预取配置
+        prefetch = cfg.train.get("prefetch_factor", 2)
+        num_workers = cfg.train.num_workers
+
         data_loader = DataLoader(
             dataset,
             batch_size=cfg.train.batch_size_per_gpu,
-            num_workers=cfg.train.num_workers,
+            num_workers=num_workers,
             pin_memory=cfg.train.pin_memory,
-            # 有 sampler 时不能用 shuffle
             shuffle=(sampler is None),
             sampler=sampler,
             drop_last=cfg.train.drop_last,
-            persistent_workers=cfg.train.persistent_workers and cfg.train.num_workers > 0,
+            persistent_workers=cfg.train.persistent_workers and num_workers > 0,
             collate_fn=collate_dino,
+            prefetch_factor=prefetch if num_workers > 0 else None,
         )
         return data_loader
 
@@ -242,6 +297,17 @@ class Trainer:
         n_total = sum(p.numel() for p in model.parameters())
         n_train = sum(p.numel() for p in model.parameters() if p.requires_grad)
         self.print(f"Params: {n_total:,} total, {n_train:,} trainable")
+
+        # --- 性能优化：torch.compile（PyTorch 2.0+） ---
+        use_compile = cfg.train.get("use_compile", False)
+        if use_compile:
+            if hasattr(torch, "compile"):
+                self.print("Applying torch.compile to student backbone...")
+                model.backbone_student = torch.compile(model.backbone_student)
+                self.print("torch.compile: enabled (first few steps will be slow)")
+            else:
+                self.print("torch.compile: not available (need PyTorch >= 2.0)")
+
         return model
 
     def build_optimizer(self, model):
@@ -258,6 +324,37 @@ class Trainer:
             betas=(cfg.optim.adamw_beta1, cfg.optim.adamw_beta2),
         )
         return optimizer
+
+    def _cleanup_old_checkpoints(self, output_dir, max_keep=3):
+        """滚动清理旧的带编号 checkpoint，只保留最新的 max_keep 个。"""
+        import glob as _glob
+        pattern = os.path.join(output_dir, "checkpoint_epoch=*.pt")
+        ckpts = sorted(_glob.glob(pattern))
+
+        if len(ckpts) <= max_keep:
+            return
+
+        to_delete = ckpts[:-max_keep]
+        for old_ckpt in to_delete:
+            try:
+                os.remove(old_ckpt)
+                self.print(f"  Deleted old checkpoint: {os.path.basename(old_ckpt)}")
+            except OSError:
+                pass
+
+    def _check_disk_space(self, path, min_free_gb=50):
+        """检查磁盘剩余空间，低于阈值时打印警告。"""
+        try:
+            stat = os.statvfs(path)
+            free_gb = (stat.f_bavail * stat.f_frsize) / (1024 ** 3)
+            if free_gb < min_free_gb:
+                self.print(
+                    f"  WARNING: Disk space low! "
+                    f"{free_gb:.1f} GB free < {min_free_gb} GB threshold. "
+                    f"Consider reducing saveckp_freq or max_keep_ckpts."
+                )
+        except Exception:
+            pass
 
     def train(self):
         cfg = self.cfg
@@ -298,9 +395,11 @@ class Trainer:
             gram_update_freq = gram_cfg.get("update_freq", 10000)
             gram_first_update = gram_cfg.get("first_update_step", 0)
             gram_max_updates = gram_cfg.get("max_updates", None)
-            # Gram teacher：EMA teacher 的冻结快照，按周期刷新
             from copy import deepcopy
-            gram_teacher = deepcopy(model.backbone_teacher if hasattr(model, "backbone_teacher") else unwrapped.backbone_teacher)
+            gram_teacher = deepcopy(
+                model.backbone_teacher if hasattr(model, "backbone_teacher")
+                else unwrapped.backbone_teacher
+            )
             gram_teacher.eval()
             gram_teacher = gram_teacher.to(self.accelerator.device)
             for p in gram_teacher.parameters():
@@ -341,6 +440,10 @@ class Trainer:
                 data_loader.set_epoch(epoch)
 
             for batch in data_loader:
+                # 容错：collate_dino 过滤掉所有 None 后可能返回空字典
+                if not batch:
+                    continue
+
                 with self.accelerator.accumulate(model):
                     # 调度学习率、权重衰减和动量
                     lr = cosine_warmup_schedule(
@@ -380,7 +483,6 @@ class Trainer:
                     loss = dino_loss
                     gram_loss_val = 0.0
                     if use_gram:
-                        # 按需更新 Gram teacher（周期性拷贝 EMA teacher）
                         if global_step >= gram_first_update:
                             do_gram_update = False
                             if not gram_initialized:
@@ -396,7 +498,6 @@ class Trainer:
                                 gram_update_count += 1
                                 self.print(f"  Gram Teacher updated (#{gram_update_count}) at step {global_step}")
 
-                        # 计算 student 与 Gram teacher 的 patch token Gram loss
                         if gram_initialized:
                             with torch.no_grad():
                                 student_features = unwrapped.backbone_student(gv).flatten(start_dim=1)
@@ -425,7 +526,7 @@ class Trainer:
                         )
                     unwrapped.head_student.cancel_last_layer_gradients(epoch)
                     optimizer.step()
-                    optimizer.zero_grad()
+                    optimizer.zero_grad(set_to_none=True)  # 优化：比 zero_grad() 更快
 
                     # 记录日志
                     dt = time.time() - t0
@@ -463,6 +564,12 @@ class Trainer:
                     epoch=epoch + 1,
                     model=unwrapped, optimizer=optimizer, criterion=criterion,
                 )
+                max_keep = cfg.train.get("max_keep_ckpts", 3)
+                self._cleanup_old_checkpoints(cfg.train.output_dir, max_keep)
+
+            min_free_gb = cfg.train.get("min_free_disk_gb", 50)
+            self._check_disk_space(cfg.train.output_dir, min_free_gb)
+
             self.accelerator.wait_for_everyone()
             self.print(f"Epoch {epoch+1} done.")
 

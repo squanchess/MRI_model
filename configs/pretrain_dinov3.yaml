@@ -1,0 +1,97 @@
+# =============================================================================
+# DINOv3 Pretraining Config for MRI
+#
+# 完整 DINOv3 = DINOv2 (DINO + iBOT + KoLeo) + Gram Anchoring
+# =============================================================================
+
+train:
+  batch_size_per_gpu: 8
+  grad_accum_steps: 1
+  data_dir: data/IXI-T1
+  data_fraction: 1.0
+  output_dir: outputs/dinov3_mri
+  saveckp_freq: 10
+  resume_ckp: true
+  seed: 42
+  num_workers: 4
+  pin_memory: true
+  persistent_workers: true
+  drop_last: true
+  log_wandb: false
+  log_freq: 10
+  mixed_precision: fp16
+  # use_compile: false             # PyTorch 2.0+ torch.compile（可选）
+  # cache_rate: 0.0                # MONAI CacheDataset 缓存比例
+  # prefetch_factor: 2
+
+optim:
+  epochs: 300
+  weight_decay: 0.04
+  weight_decay_end: 0.4
+  base_lr: 0.0005
+  lr: 0.0                          # 由 apply_scaling_rules 自动设置
+  warmup_epochs: 20
+  min_lr: 1.0e-06
+  llrd_factor: 0.9
+  patch_embed_lr_mult: 0.2
+  projection_head_wd_mult: 1.0
+  clip_grad_norm: 3.0
+  scaling_rule: sqrt_wrt_1024
+  adamw_beta1: 0.9
+  adamw_beta2: 0.999
+  # --- Loss 权重 ---
+  dino_loss_weight: 1.0
+  ibot_loss_weight: 1.0
+  koleo_loss_weight: 0.1
+
+model:
+  architecture: vit_small_patch16_96
+  pretrained_weights: null
+  hidden_dim: 2048
+  bottleneck_dim: 256
+  output_dim: 65536
+  layer_scale_init_value: 1.0e-3    # DINOv2/v3 推荐
+  momentum_teacher: 0.996
+  momentum_teacher_end: 1.0
+  warmup_teacher_temp: 0.04
+  teacher_temp: 0.07
+  warmup_teacher_temp_epochs: 30
+  student_temp: 0.1
+  center_momentum: 0.9
+  freeze_last_layer: 0              # DINOv2/v3 通常 freeze_last_layer=0
+  num_base_patches: 4
+  num_local_views: 6
+
+  # --- DINOv2: iBOT masking ---
+  ibot_seperate_head: true          # 独立的 iBOT 投影头
+  student_drop_path_rate: 0.1       # Student stochastic depth
+  mask_probability: 0.5             # Batch 中被 mask 的比例
+  mask_ratio_min: 0.2               # 每张图最少 mask 比例
+  mask_ratio_max: 0.7               # 每张图最多 mask 比例
+
+  # --- DINOv3: Register tokens ---
+  reg_tokens: 4
+
+  # --- DINOv3: RoPE coord augmentations ---
+  rope_shift_coords: 0.5
+  rope_jitter_coords: 1.5
+  rope_rescale_coords: 1.5
+
+  # --- MRI-specific transform settings ---
+  global_views_size: [96, 96, 96]
+  local_views_size: [48, 48, 48]
+  local_views_scale: [0.25, 0.5]
+  roi_size: [192, 224, 192]
+  spacing: [1.0, 1.0, 1.0]
+
+# --- DINOv3: Gram Anchoring ---
+gram:
+  enabled: true
+  loss_weight: 1.0
+  img_level: true
+  apply_norm: true
+  remove_neg: false
+  remove_only_teacher_neg: false
+  update_freq: 10000
+  first_update_step: 0
+  max_updates: null

@@ -11,7 +11,7 @@ from .mri_dataset import (
     # 工具函数
     _discover_nifti_files,
 )
-from .transforms import DINOTransform
+from .transforms import DINOTransform, SafeDINOTransform
 from .collate import collate_dino
 
 __all__ = [
@@ -24,5 +24,6 @@ __all__ = [
     'IXIPersistentDataset',
     '_discover_nifti_files',
     'DINOTransform',
+    'SafeDINOTransform',
     'collate_dino',
 ]

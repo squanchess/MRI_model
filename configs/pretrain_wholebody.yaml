@@ -15,7 +15,9 @@ train:
   data_dir: D:/rkj/MRI_model/data  # 统一数据目录（prepare_datasets.py 的输出）
   data_fraction: 1.0
   output_dir: outputs/dino_wholebody
-  saveckp_freq: 10
+  saveckp_freq: 20                # 每 20 个 epoch 存一次带编号的 checkpoint
+  max_keep_ckpts: 3               # 只保留最近 3 个带编号的 checkpoint（自动删旧的）
+  min_free_disk_gb: 50            # 磁盘剩余低于 50GB 时打印警告
   resume_ckp: true
   seed: 42
   num_workers: 4
@@ -24,6 +26,13 @@ train:
   drop_last: true
   log_wandb: false
   log_freq: 10
+
+  # --- 性能优化 ---
+  mixed_precision: fp16            # fp16=半精度(推荐) / bf16(A100+) / no=关闭
+  use_compile: false               # torch.compile 加速（PyTorch 2.0+，首次编译慢）
+  cache_rate: 0.0                  # MONAI CacheDataset 缓存比例（0.0=关闭，1.0=全缓存）
+  cache_num_workers: 4             # 缓存构建并行数
+  prefetch_factor: 2               # DataLoader 预取批次数
 
   # --- 多数据源配置（可选，与 data_dir 二选一） ---
   # 当 data_dirs 存在时，优先于 data_dir

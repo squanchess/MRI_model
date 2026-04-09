@@ -1,10 +1,8 @@
 """
-DINO 的批处理拼接函数。
+DINO 的批处理拼接函数（容错版）。
 
-接收由 DINOTransform 为每个样本生成的字典列表，
-并将全局视图与局部视图分别堆叠成 batch 张量。
-
-代码改自 SPECTRE（MIT License），已移除 SigLIP 的 collate 逻辑。
+接收由 SafeDINOTransform 为每个样本生成的字典列表，
+过滤掉 None（损坏样本），并将全局视图与局部视图分别堆叠成 batch 张量。
 """
 from typing import List
 
@@ -15,17 +13,27 @@ from monai.data import list_data_collate
 def collate_dino(samples_list: List) -> dict:
     """将 DINO 多裁剪样本整理为批量张量。
 
-    输入：由字典组成的列表，每个字典包含：
+    容错逻辑：
+      - 过滤掉 SafeDINOTransform 返回的 None（损坏样本）
+      - 如果整个 batch 全部为 None，返回空字典，由训练循环跳过
+
+    输入：由字典组成的列表（可能包含 None），每个字典包含：
         - "image_global_views": list of 2 tensors (C, H, W, D)
         - "image_local_views":  list of N tensors (C, h, w, d)
 
     输出：包含以下字段的字典：
         - "global_views": (2*B, C, H, W, D)
         - "local_views":  (N*B, C, h, w, d)
+        或者空字典 {} 当全部样本都失败时
     """
-    collated_data = list_data_collate(samples_list)
+    # 过滤 None
+    valid_samples = [s for s in samples_list if s is not None]
 
-    # 所有样本在第0维拼接
+    if not valid_samples:
+        return {}
+
+    collated_data = list_data_collate(valid_samples)
+
     global_views = torch.cat(collated_data["image_global_views"], dim=0)
     local_views = torch.cat(collated_data["image_local_views"], dim=0)
 

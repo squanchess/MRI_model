@@ -269,6 +269,8 @@ class MultiSourceMRIDataset:
         transform: Optional[Callable] = None,
         fraction: float = 1.0,
         recursive: bool = True,
+        cache_rate: float = 0.0,
+        cache_num_workers: int = 4,
     ):
         # 统一为字典形式
         if isinstance(data_dirs, (list, tuple)):
@@ -282,18 +284,31 @@ class MultiSourceMRIDataset:
         datasets: List[Dataset] = []
         offset = 0
 
+        use_cache = cache_rate > 0
+
         for name, path in sorted(data_dirs.items()):
             if not os.path.isdir(path):
                 warnings.warn(f"数据源 '{name}' 目录不存在，跳过: {path}")
                 continue
 
             try:
-                ds = MRIDataset(
-                    data_dir=path,
-                    transform=transform,
-                    fraction=fraction,
-                    recursive=recursive,
+                data_list = _discover_nifti_files(
+                    path, recursive=recursive, fraction=fraction,
                 )
+                if use_cache:
+                    ds = CacheDataset(
+                        data=data_list,
+                        transform=transform,
+                        cache_rate=cache_rate,
+                        num_workers=cache_num_workers,
+                    )
+                else:
+                    ds = MRIDataset(
+                        data_dir=path,
+                        transform=transform,
+                        fraction=fraction,
+                        recursive=recursive,
+                    )
             except FileNotFoundError as e:
                 warnings.warn(f"数据源 '{name}' 无有效文件，跳过: {e}")
                 continue

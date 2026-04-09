@@ -37,7 +37,7 @@ def get_args_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="DINO MRI Pretraining")
     parser.add_argument(
         "--config_file", type=str, default=None,
-        help="YAML 配置文件路径，默认使用 configs/pretrain.yaml",
+        help="YAML 配置文件路径，默认使用 configs/pretrain_wholebody.yaml",
     )
     parser.add_argument(
         "--output_dir", type=str, default="outputs/dino",
